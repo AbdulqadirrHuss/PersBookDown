@@ -165,8 +165,8 @@ def get_download_link(result: dict) -> str:
         return get_download_from_page(result['link'])
 
 
-def get_download_from_md5(md5: str) -> str:
-    """Get download link from MD5 page"""
+def get_download_from_md5(md5: str) -> list:
+    """Get all download links from MD5 page"""
     
     url = f"https://welib.org/md5/{md5}"
     
@@ -183,17 +183,17 @@ def get_download_from_md5(md5: str) -> str:
             f.write(response.text)
         
         if response.status_code != 200:
-            return None
+            return []
         
-        return extract_download_link(response.text)
+        return extract_download_links(response.text)
         
     except Exception as e:
         logger.error(f"Error getting MD5 page: {e}")
-        return None
+        return []
 
 
-def get_download_from_page(url: str) -> str:
-    """Get download link from a book page"""
+def get_download_from_page(url: str) -> list:
+    """Get all download links from a book page"""
     
     logger.info(f"Getting book page: {url}")
     logger.info("Waiting 5 seconds...")
@@ -208,56 +208,100 @@ def get_download_from_page(url: str) -> str:
             f.write(response.text)
         
         if response.status_code != 200:
-            return None
+            return []
         
-        return extract_download_link(response.text)
+        return extract_download_links(response.text)
         
     except Exception as e:
         logger.error(f"Error getting book page: {e}")
-        return None
+        return []
+
+
+def get_download_links(result: dict) -> list:
+    """Get all download links from result"""
+    
+    if result['type'] == 'md5':
+        # Extract MD5 from link URL
+        link = result['link']
+        md5_match = re.search(r'/md5/([a-fA-F0-9]{32})', link)
+        if md5_match:
+            return get_download_from_md5(md5_match.group(1))
+        else:
+            logger.error(f"Could not extract MD5 from link: {link}")
+            return []
+    elif result['type'] == 'direct':
+        return [result['link']]
+    else:
+        return get_download_from_page(result['link'])
+
+
+def extract_download_links(html: str) -> list:
+    """Extract ALL download links from page HTML for fallback support"""
+    
+    links = []
+    
+    # Pattern 1: Slow download link (preferred but may 403)
+    slow_matches = re.findall(r'href="([^"]*(?:slow_download|slow|free)[^"]*)"', html, re.IGNORECASE)
+    for link in slow_matches:
+        if not link.startswith('http'):
+            link = f"https://welib.org{link}"
+        if link not in links:
+            links.append(link)
+            logger.info(f"Found slow download link: {link}")
+    
+    # Pattern 2: IPFS links (reliable, no auth needed)
+    ipfs_matches = re.findall(r'href="([^"]*(?:ipfs|cloudflare-ipfs|dweb)[^"]*)"', html, re.IGNORECASE)
+    for link in ipfs_matches:
+        if link not in links:
+            links.append(link)
+            logger.info(f"Found IPFS link: {link}")
+    
+    # Pattern 3: Direct CDN/file links
+    cdn_matches = re.findall(r'href="(https?://[^"]*(?:cdn|download|get)[^"]*\.(pdf|epub|mobi|azw3))"', html, re.IGNORECASE)
+    for match in cdn_matches:
+        link = match[0]
+        if link not in links:
+            links.append(link)
+            logger.info(f"Found CDN link: {link}")
+    
+    # Pattern 4: Fast download links
+    fast_matches = re.findall(r'href="([^"]*(?:fast_download|fast)[^"]*)"', html, re.IGNORECASE)
+    for link in fast_matches:
+        if not link.startswith('http'):
+            link = f"https://welib.org{link}"
+        if link not in links:
+            links.append(link)
+            logger.info(f"Found fast download link: {link}")
+    
+    # Pattern 5: General download links
+    download_matches = re.findall(r'href="([^"]*download[^"]*)"', html, re.IGNORECASE)
+    for link in download_matches:
+        if 'slow' not in link and 'fast' not in link:  # Don't duplicate
+            if not link.startswith('http'):
+                link = f"https://welib.org{link}"
+            if link not in links:
+                links.append(link)
+                logger.info(f"Found download link: {link}")
+    
+    # Pattern 6: LibGen mirrors
+    libgen_matches = re.findall(r'href="(https?://[^"]*(?:libgen|library\.lol|gen\.lib)[^"]*)"', html, re.IGNORECASE)
+    for link in libgen_matches:
+        if link not in links:
+            links.append(link)
+            logger.info(f"Found LibGen mirror: {link}")
+    
+    if not links:
+        logger.warning("No download links found in page")
+    else:
+        logger.info(f"Total download links found: {len(links)}")
+    
+    return links
 
 
 def extract_download_link(html: str) -> str:
-    """Extract download link from page HTML"""
-    
-    # Look for slow download link (preferred)
-    slow_matches = re.findall(r'href="([^"]*(?:slow|free)[^"]*)"', html, re.IGNORECASE)
-    if slow_matches:
-        link = slow_matches[0]
-        if not link.startswith('http'):
-            link = f"https://welib.org{link}"
-        logger.info(f"Found slow download link: {link}")
-        return link
-    
-    # Look for download button/link
-    download_matches = re.findall(r'href="([^"]*download[^"]*)"', html, re.IGNORECASE)
-    if download_matches:
-        link = download_matches[0]
-        if not link.startswith('http'):
-            link = f"https://welib.org{link}"
-        logger.info(f"Found download link: {link}")
-        return link
-    
-    # Look for direct file links
-    file_matches = re.findall(r'href="([^"]*\.(pdf|epub|mobi|azw3)[^"]*)"', html, re.IGNORECASE)
-    if file_matches:
-        link = file_matches[0][0]
-        if not link.startswith('http'):
-            link = f"https://welib.org{link}"
-        logger.info(f"Found file link: {link}")
-        return link
-    
-    # Look for any link with 'get' in it
-    get_matches = re.findall(r'href="([^"]*(?:/get/|get\.php)[^"]*)"', html, re.IGNORECASE)
-    if get_matches:
-        link = get_matches[0]
-        if not link.startswith('http'):
-            link = f"https://welib.org{link}"
-        logger.info(f"Found get link: {link}")
-        return link
-    
-    logger.warning("No download link found in page")
-    return None
+    """Extract first download link (legacy compatibility)"""
+    links = extract_download_links(html)
+    return links[0] if links else None
 
 
 def download_file(url: str, filename: str) -> bool:
@@ -327,15 +371,25 @@ def process_search(query: str) -> bool:
         logger.error("No search results")
         return False
     
-    # Get download link
-    download_url = get_download_link(result)
-    if not download_url:
-        logger.error("No download link found")
+    # Get ALL download links
+    download_urls = get_download_links(result)
+    if not download_urls:
+        logger.error("No download links found")
         return False
     
-    # Download
+    # Try each download link until one works
     safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', query)[:50].replace(' ', '_')
-    return download_file(download_url, f"{safe_name}.pdf")
+    filename = f"{safe_name}.pdf"
+    
+    for i, url in enumerate(download_urls):
+        logger.info(f"Trying download source {i+1}/{len(download_urls)}: {url[:80]}...")
+        if download_file(url, filename):
+            return True
+        logger.warning(f"Download source {i+1} failed, trying next...")
+        time.sleep(5)  # Brief pause between attempts
+    
+    logger.error("All download sources failed")
+    return False
 
 
 def main():
