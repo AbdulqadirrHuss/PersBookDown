@@ -16,26 +16,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Install libgen-cli
-        run: |
-          echo "=== Installing libgen-cli v1.1.0 ==="
-          # Download Linux binary directly (not a tar.gz)
-          curl -sL -o libgen-cli https://github.com/ciehanski/libgen-cli/releases/download/v1.1.0/libgen-cli-v1.1.0-linux
-          chmod +x libgen-cli
-          ./libgen-cli --help | head -20 || echo "Help output failed, continuing..."
-          echo "=== libgen-cli installed ==="
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       
       - name: Create downloads directory
         run: mkdir -p downloads
       
-      - name: Parse search terms and download
+      - name: Parse search terms
         run: |
           echo "=== Parsing search terms ==="
           echo '${{ github.event.inputs.search_terms }}' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' > search_terms.txt
           cat -n search_terms.txt
+      
+      - name: Download books via libgen-downloader
+        run: |
+          echo "=== Installing libgen-downloader ==="
+          npm install -g libgen-downloader
           
           echo ""
-          echo "=== Downloading books via IPFS ==="
+          echo "=== Downloading books ==="
           
           while IFS= read -r term; do
             echo ""
@@ -43,21 +44,29 @@ jobs:
             echo "Searching: $term"
             echo "========================================"
             
-            # libgen-cli download with IPFS flag (-i)
-            # -o specifies output directory  
-            # -i enables IPFS gateway downloads
-            ./libgen-cli download -i -o downloads/ "$term" && echo "SUCCESS: $term" || echo "FAILED: $term"
+            # libgen-downloader search and download
+            # Use timeout to prevent hanging on interactive prompts
+            # -d downloads the first result automatically
+            timeout 120 libgen-downloader -s "$term" -d || echo "FAILED or TIMEOUT: $term"
             
-            echo "Waiting 3 seconds..."
+            # Wait between searches
             sleep 3
           done < search_terms.txt
+          
+          # Move any downloaded files to downloads folder
+          echo ""
+          echo "=== Moving downloaded files ==="
+          mv *.pdf downloads/ 2>/dev/null || true
+          mv *.epub downloads/ 2>/dev/null || true
+          mv *.mobi downloads/ 2>/dev/null || true
+          find . -maxdepth 1 -type f \( -name "*.pdf" -o -name "*.epub" -o -name "*.mobi" \) -exec mv {} downloads/ \; 2>/dev/null || true
       
       - name: List downloaded files
         run: |
           echo "=== Downloaded Files ==="
-          ls -lah downloads/ 2>/dev/null || echo "No files downloaded"
+          ls -lah downloads/ 2>/dev/null || echo "No files"
           echo ""
-          echo "File count:"
+          echo "=== File count ==="
           find downloads/ -type f 2>/dev/null | wc -l
       
       - name: Upload downloads as artifact
