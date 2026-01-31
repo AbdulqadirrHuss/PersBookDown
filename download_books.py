@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Ebook Download from welib.org using cloudscraper to bypass Cloudflare
+Supports proxy configuration via PROXY_URL environment variable
 """
 
 import os
@@ -8,9 +9,13 @@ import re
 import sys
 import time
 import logging
+import urllib3
 from pathlib import Path
 
 import cloudscraper
+
+# Disable SSL warnings when verification is disabled
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Setup logging
 logging.basicConfig(
@@ -23,6 +28,15 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
 
+# Proxy configuration from environment
+PROXY_URL = os.environ.get("PROXY_URL")
+if PROXY_URL:
+    logger.info(f"Using proxy: {PROXY_URL[:20]}...")
+    PROXIES = {"http": PROXY_URL, "https": PROXY_URL}
+else:
+    logger.info("No proxy configured (set PROXY_URL env var for proxy support)")
+    PROXIES = None
+
 # Create scraper that can bypass Cloudflare
 scraper = cloudscraper.create_scraper(
     browser={
@@ -31,6 +45,13 @@ scraper = cloudscraper.create_scraper(
         'desktop': True
     }
 )
+
+# Disable SSL verification (some mirrors use self-signed certs or are behind firewalls)
+scraper.verify = False
+
+# Set proxies if configured
+if PROXIES:
+    scraper.proxies = PROXIES
 
 
 def search_welib(query: str) -> dict:
