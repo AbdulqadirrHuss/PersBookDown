@@ -1,0 +1,4 @@
+# Example book list - one "Title - Author" per line
+1984 - George Orwell
+The Great Gatsby - F. Scott Fitzgerald
+Pride and Prejudice - Jane Austen
