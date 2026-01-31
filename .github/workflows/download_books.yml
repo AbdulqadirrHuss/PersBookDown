@@ -18,12 +18,11 @@ jobs:
       
       - name: Install libgen-cli
         run: |
-          echo "=== Installing libgen-cli ==="
-          # Download latest release
-          curl -sL https://github.com/ciehanski/libgen-cli/releases/latest/download/libgen-cli_Linux_x86_64.tar.gz -o libgen-cli.tar.gz
-          tar -xzf libgen-cli.tar.gz
+          echo "=== Installing libgen-cli v1.1.0 ==="
+          # Download Linux binary directly (not a tar.gz)
+          curl -sL -o libgen-cli https://github.com/ciehanski/libgen-cli/releases/download/v1.1.0/libgen-cli-v1.1.0-linux
           chmod +x libgen-cli
-          ./libgen-cli --version || echo "Version check failed, but binary may still work"
+          ./libgen-cli --help | head -20 || echo "Help output failed, continuing..."
           echo "=== libgen-cli installed ==="
       
       - name: Create downloads directory
@@ -40,14 +39,14 @@ jobs:
           
           while IFS= read -r term; do
             echo ""
-            echo "----------------------------------------"
+            echo "========================================"
             echo "Searching: $term"
-            echo "----------------------------------------"
+            echo "========================================"
             
-            # Use libgen-cli with IPFS flag for gateway downloads
-            # -o specifies output directory
-            # --ipfs forces download via IPFS gateways
-            ./libgen-cli download --ipfs -o downloads/ "$term" || echo "Failed: $term"
+            # libgen-cli download with IPFS flag (-i)
+            # -o specifies output directory  
+            # -i enables IPFS gateway downloads
+            ./libgen-cli download -i -o downloads/ "$term" && echo "SUCCESS: $term" || echo "FAILED: $term"
             
             echo "Waiting 3 seconds..."
             sleep 3
