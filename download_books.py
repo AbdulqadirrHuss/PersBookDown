@@ -32,18 +32,23 @@ REQUEST_TIMEOUT = 30
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2
 
-# LibGen mirrors to try
+# LibGen mirrors to try (ordered by typical reliability)
 LIBGEN_MIRRORS = [
+    "https://libgen.li",
     "https://libgen.is",
     "https://libgen.rs", 
     "https://libgen.st",
+    "https://libgen.lc",
+    "https://libgen.gs",
 ]
 
 # Anna's Archive mirrors
 ANNAS_MIRRORS = [
     "https://annas-archive.org",
     "https://annas-archive.se",
+    "https://annas-archive.li",
 ]
+
 
 # Preferred formats in order of priority
 PREFERRED_FORMATS = ['.epub', '.pdf', '.mobi', '.azw3']
