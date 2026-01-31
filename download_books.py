@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Ebook Download from welib.org using cloudscraper to bypass Cloudflare
+Ebook Download using FlareSolverr to bypass Cloudflare
+FlareSolverr uses a real Chrome browser to solve challenges
 """
 
 import os
 import re
 import sys
 import time
+import json
 import logging
-import urllib3
 from pathlib import Path
 
-import cloudscraper
-
-# Disable SSL warnings when verification is disabled
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import requests
 
 # Setup logging
 logging.basicConfig(
@@ -26,381 +24,139 @@ logger = logging.getLogger(__name__)
 # Constants
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
+FLARESOLVERR_URL = "http://localhost:8191/v1"
 
-# Create scraper that can bypass Cloudflare
-scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'desktop': True
+# Session ID for reusing Cloudflare clearance
+SESSION_ID = None
+
+
+def flaresolverr_request(url: str, max_timeout: int = 60000) -> dict:
+    """
+    Send request through FlareSolverr to bypass Cloudflare
+    Returns dict with 'html' and 'cookies' keys
+    """
+    global SESSION_ID
+    
+    payload = {
+        "cmd": "request.get",
+        "url": url,
+        "maxTimeout": max_timeout
     }
-)
-
-# Disable SSL verification (some mirrors use self-signed certs)
-scraper.verify = False
-
-
-def search_welib(query: str) -> dict:
-    """Search welib.org and return first result"""
     
-    encoded_query = query.replace(' ', '%20')
-    url = f"https://welib.org/search?q={encoded_query}"
+    # Reuse session if available (faster, uses same clearance cookies)
+    if SESSION_ID:
+        payload["session"] = SESSION_ID
     
-    logger.info(f"Searching: {url}")
-    logger.info("Waiting 5 seconds before request...")
-    time.sleep(5)
+    logger.info(f"FlareSolverr request: {url}")
     
     try:
-        response = scraper.get(url, timeout=60)
-        logger.info(f"Response status: {response.status_code}")
-        logger.info(f"Response length: {len(response.text)} characters")
-        
-        # Save for debugging
-        with open('/tmp/welib_search.html', 'w', encoding='utf-8') as f:
-            f.write(response.text)
-        logger.info("Saved response to /tmp/welib_search.html")
+        response = requests.post(
+            FLARESOLVERR_URL,
+            json=payload,
+            timeout=120  # Allow time for Cloudflare solving
+        )
         
         if response.status_code != 200:
-            logger.error(f"Bad status code: {response.status_code}")
+            logger.error(f"FlareSolverr error: {response.status_code}")
             return None
         
-        # Check if blocked by Cloudflare
-        if 'Cloudflare' in response.text and 'blocked' in response.text.lower():
-            logger.error("Blocked by Cloudflare")
+        result = response.json()
+        
+        if result.get("status") != "ok":
+            logger.error(f"FlareSolverr failed: {result.get('message')}")
             return None
         
-        html = response.text
+        solution = result.get("solution", {})
         
-        # WeLib book result patterns - analyze all links
-        all_links = re.findall(r'href="([^"]+)"', html)
+        # Save session ID for reuse
+        if not SESSION_ID and "session" in result:
+            SESSION_ID = result["session"]
+            logger.info(f"Created FlareSolverr session: {SESSION_ID}")
         
-        logger.info(f"Total links found: {len(all_links)}")
+        return {
+            "html": solution.get("response", ""),
+            "cookies": solution.get("cookies", []),
+            "status": solution.get("status", 0),
+            "url": solution.get("url", url)
+        }
         
-        # Filter to unique links and log them
-        unique_links = list(set(all_links))
-        
-        # Separate links by type for debugging
-        book_links = []
-        for link in unique_links:
-            # Skip static/navigation links
-            if any(skip in link for skip in ['.css', '.js', '.png', '.jpg', '/donate', '/login', '/account', '/search?', 'javascript:', '#', '/manifest', 'favicon']):
-                continue
-            book_links.append(link)
-        
-        logger.info(f"Potential content links: {len(book_links)}")
-        for link in book_links[:30]:  # Log first 30
-            logger.info(f"  Link: {link}")
-        
-        # Pattern 1: /md5/HASH - this is the standard pattern
-        md5_matches = re.findall(r'href="(/md5/[a-fA-F0-9]{32})"', html)
-        if md5_matches:
-            link = md5_matches[0]
-            logger.info(f"Found MD5 link: {link}")
-            return {'link': f"https://welib.org{link}", 'type': 'md5'}
-        
-        # Pattern 2: Check for /book/ID pattern
-        book_id_matches = re.findall(r'href="(/book/[^"]+)"', html)
-        if book_id_matches:
-            link = book_id_matches[0]
-            logger.info(f"Found book ID link: {link}")
-            return {'link': f"https://welib.org{link}", 'type': 'book'}
-        
-        # Pattern 3: Check for result cards - common patterns in book libraries
-        # Look for links that contain identifiers like ISBNs, fileIDs, etc
-        for link in book_links:
-            # Links with long alphanumeric IDs
-            if re.search(r'/[a-zA-Z]+/[a-zA-Z0-9]{8,}', link):
-                if not link.startswith('http'):
-                    link = f"https://welib.org{link}"
-                logger.info(f"Found ID-based link: {link}")
-                return {'link': link, 'type': 'id'}
-        
-        # Pattern 4: Links containing 'file', 'download', 'get'
-        for link in book_links:
-            if any(kw in link.lower() for kw in ['file', 'download', 'get', 'epub', 'pdf']):
-                if not link.startswith('http'):
-                    link = f"https://welib.org{link}"
-                logger.info(f"Found download-type link: {link}")
-                return {'link': link, 'type': 'download'}
-        
-        # Pattern 5: Look at links starting with specific paths
-        for link in book_links:
-            # Skip obvious site pages
-            if link in ['/', '/about', '/help', '/faq', '/contact']:
-                continue
-            # Any other path that might be a book
-            if link.startswith('/') and len(link) > 5:
-                # Has some ID-like component
-                if re.search(r'[0-9]', link) or len(link) > 20:
-                    full_link = f"https://welib.org{link}"
-                    logger.info(f"Found potential book path: {full_link}")
-                    return {'link': full_link, 'type': 'path'}
-        
-        logger.warning("Could not identify book links in search results")
-        logger.info("First 5000 chars of body for debugging:")
-        # Find body content
-        body_start = html.find('<main')
-        if body_start > 0:
-            logger.info(html[body_start:body_start+5000])
-        else:
-            logger.info(html[:5000])
-        
+    except requests.exceptions.Timeout:
+        logger.error("FlareSolverr request timed out")
         return None
-        
     except Exception as e:
-        logger.error(f"Search error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"FlareSolverr error: {e}")
         return None
 
 
-def get_download_link(result: dict) -> str:
-    """Get download link from result"""
-    
-    if result['type'] == 'md5':
-        # Extract MD5 from link URL like /md5/abc123... or https://welib.org/md5/abc123...
-        link = result['link']
-        md5_match = re.search(r'/md5/([a-fA-F0-9]{32})', link)
-        if md5_match:
-            return get_download_from_md5(md5_match.group(1))
-        else:
-            logger.error(f"Could not extract MD5 from link: {link}")
-            return None
-    elif result['type'] == 'direct':
-        return result['link']
-    else:
-        return get_download_from_page(result['link'])
-
-
-def get_download_from_md5(md5: str) -> list:
-    """Get all download links from MD5 - including LibGen mirrors"""
-    
-    links = []
-    
-    # Add LibGen mirror links FIRST - they often work without auth
-    # These use the MD5 hash directly to download
-    libgen_mirrors = [
-        f"https://libgen.li/ads.php?md5={md5}",
-        f"https://libgen.rocks/ads.php?md5={md5}",
-        f"http://library.lol/main/{md5}",
-        f"https://libgen.is/book/index.php?md5={md5}",
-        f"https://libgen.rs/book/index.php?md5={md5}",
-    ]
-    
-    for mirror in libgen_mirrors:
-        links.append(mirror)
-        logger.info(f"Added LibGen mirror: {mirror}")
-    
-    # Also try welib page for additional links
-    url = f"https://welib.org/md5/{md5}"
-    
-    logger.info(f"Getting MD5 page: {url}")
-    logger.info("Waiting 5 seconds...")
-    time.sleep(5)
+def create_session():
+    """Create a FlareSolverr session for cookie persistence"""
+    global SESSION_ID
     
     try:
-        response = scraper.get(url, timeout=60)
-        logger.info(f"Response status: {response.status_code}")
-        
-        # Save for debugging
-        with open('/tmp/welib_md5.html', 'w', encoding='utf-8') as f:
-            f.write(response.text)
+        response = requests.post(
+            FLARESOLVERR_URL,
+            json={"cmd": "sessions.create"},
+            timeout=30
+        )
         
         if response.status_code == 200:
-            welib_links = extract_download_links(response.text)
-            for link in welib_links:
-                if link not in links:
-                    links.append(link)
-        
+            result = response.json()
+            if result.get("status") == "ok":
+                SESSION_ID = result.get("session")
+                logger.info(f"Created session: {SESSION_ID}")
+                return True
     except Exception as e:
-        logger.error(f"Error getting MD5 page: {e}")
+        logger.error(f"Failed to create session: {e}")
     
-    return links
+    return False
 
 
-def get_download_from_page(url: str) -> list:
-    """Get all download links from a book page"""
+def destroy_session():
+    """Clean up FlareSolverr session"""
+    global SESSION_ID
     
-    logger.info(f"Getting book page: {url}")
-    logger.info("Waiting 5 seconds...")
-    time.sleep(5)
+    if not SESSION_ID:
+        return
     
     try:
-        response = scraper.get(url, timeout=60)
-        logger.info(f"Response status: {response.status_code}")
-        
-        # Save for debugging
-        with open('/tmp/welib_book.html', 'w', encoding='utf-8') as f:
-            f.write(response.text)
-        
-        if response.status_code != 200:
-            return []
-        
-        return extract_download_links(response.text)
-        
-    except Exception as e:
-        logger.error(f"Error getting book page: {e}")
-        return []
+        requests.post(
+            FLARESOLVERR_URL,
+            json={"cmd": "sessions.destroy", "session": SESSION_ID},
+            timeout=10
+        )
+        logger.info(f"Destroyed session: {SESSION_ID}")
+    except:
+        pass
+    
+    SESSION_ID = None
 
 
-def get_download_links(result: dict) -> list:
-    """Get all download links from result"""
-    
-    if result['type'] == 'md5':
-        # Extract MD5 from link URL
-        link = result['link']
-        md5_match = re.search(r'/md5/([a-fA-F0-9]{32})', link)
-        if md5_match:
-            return get_download_from_md5(md5_match.group(1))
-        else:
-            logger.error(f"Could not extract MD5 from link: {link}")
-            return []
-    elif result['type'] == 'direct':
-        return [result['link']]
-    else:
-        return get_download_from_page(result['link'])
-
-
-def extract_download_links(html: str) -> list:
-    """Extract ALL download links from page HTML for fallback support"""
-    
-    links = []
-    
-    # Pattern 1: Slow download link (preferred but may 403)
-    slow_matches = re.findall(r'href="([^"]*(?:slow_download|slow|free)[^"]*)"', html, re.IGNORECASE)
-    for link in slow_matches:
-        if not link.startswith('http'):
-            link = f"https://welib.org{link}"
-        if link not in links:
-            links.append(link)
-            logger.info(f"Found slow download link: {link}")
-    
-    # Pattern 2: IPFS CID links - convert to HTTP gateways
-    # Look for ipfs:// protocol links with CID
-    ipfs_cid_matches = re.findall(r'ipfs://([a-zA-Z0-9]{46,})', html)
-    for cid in ipfs_cid_matches:
-        # Use multiple IPFS gateways for reliability
-        gateway_urls = [
-            f"https://ipfs.io/ipfs/{cid}",
-            f"https://dweb.link/ipfs/{cid}",
-            f"https://w3s.link/ipfs/{cid}",
-        ]
-        for gateway_url in gateway_urls:
-            if gateway_url not in links:
-                links.append(gateway_url)
-                logger.info(f"Found IPFS CID, using gateway: {gateway_url}")
-    
-    # Also try to find direct gateway links in page
-    gateway_matches = re.findall(r'href="(https?://[^"]*(?:ipfs\.io|dweb\.link|w3s\.link|gateway\.pinata\.cloud)/ipfs/[^"]+)"', html, re.IGNORECASE)
-    for link in gateway_matches:
-        if link not in links:
-            links.append(link)
-            logger.info(f"Found IPFS gateway link: {link}")
-    
-    # Pattern 3: Direct CDN/file links
-    cdn_matches = re.findall(r'href="(https?://[^"]*(?:cdn|download|get)[^"]*\.(pdf|epub|mobi|azw3))"', html, re.IGNORECASE)
-    for match in cdn_matches:
-        link = match[0]
-        if link not in links:
-            links.append(link)
-            logger.info(f"Found CDN link: {link}")
-    
-    # Pattern 4: Fast download links
-    fast_matches = re.findall(r'href="([^"]*(?:fast_download|fast)[^"]*)"', html, re.IGNORECASE)
-    for link in fast_matches:
-        if not link.startswith('http'):
-            link = f"https://welib.org{link}"
-        if link not in links:
-            links.append(link)
-            logger.info(f"Found fast download link: {link}")
-    
-    
-    # Pattern 5: General download links (but exclude account pages)
-    download_matches = re.findall(r'href="([^"]*download[^"]*)"', html, re.IGNORECASE)
-    for link in download_matches:
-        # Skip account pages, slow/fast (already captured)
-        if 'slow' in link or 'fast' in link or 'account' in link:
-            continue
-        if not link.startswith('http'):
-            link = f"https://welib.org{link}"
-        if link not in links:
-            links.append(link)
-            logger.info(f"Found download link: {link}")
-    
-    # Pattern 6: LibGen mirrors
-    libgen_matches = re.findall(r'href="(https?://[^"]*(?:libgen|library\.lol|gen\.lib)[^"]*)"', html, re.IGNORECASE)
-    for link in libgen_matches:
-        if link not in links:
-            links.append(link)
-            logger.info(f"Found LibGen mirror: {link}")
-    
-    if not links:
-        logger.warning("No download links found in page")
-    else:
-        logger.info(f"Total download links found: {len(links)}")
-    
-    return links
-
-
-def extract_download_link(html: str) -> str:
-    """Extract first download link (legacy compatibility)"""
-    links = extract_download_links(html)
-    return links[0] if links else None
-
-
-def download_file(url: str, filename: str) -> bool:
-    """Download file from URL - handles LibGen pages that require parsing"""
+def download_direct(url: str, filename: str, cookies: list = None) -> bool:
+    """Download file directly using harvested cookies"""
     
     save_path = DOWNLOADS_DIR / filename
     
     logger.info(f"Downloading: {url}")
     logger.info(f"Saving as: {filename}")
     
-    # Check if this is a LibGen page URL that needs parsing
-    if any(domain in url for domain in ['libgen.li', 'libgen.rocks', 'libgen.is', 'libgen.rs', 'library.lol']):
-        logger.info("Detected LibGen URL, parsing page for download link...")
-        time.sleep(3)
-        try:
-            page_response = scraper.get(url, timeout=60)
-            if page_response.status_code == 200:
-                # LibGen pages have download links with GET pattern or direct file links
-                download_patterns = [
-                    r'href="(https?://[^"]+/get\.php\?[^"]+)"',
-                    r'href="(https?://download[^"]+)"',
-                    r'href="(https?://[^"]+\.pdf)"',
-                    r'href="(https?://[^"]+\.epub)"',
-                    r'<a href="([^"]+)"[^>]*>GET</a>',
-                    r'<a href="([^"]+)"[^>]*>Cloudflare</a>',
-                    r'<a href="([^"]+)"[^>]*>IPFS\.io</a>',
-                ]
-                for pattern in download_patterns:
-                    matches = re.findall(pattern, page_response.text, re.IGNORECASE)
-                    if matches:
-                        url = matches[0]
-                        if not url.startswith('http'):
-                            # Handle relative URLs
-                            from urllib.parse import urljoin
-                            url = urljoin(page_response.url, url)
-                        logger.info(f"Found LibGen download link: {url}")
-                        break
-                else:
-                    logger.warning("Could not find download link in LibGen page")
-                    # Save for debugging
-                    with open('/tmp/libgen_page.html', 'w', encoding='utf-8') as f:
-                        f.write(page_response.text[:5000])
-                    return False
-            else:
-                logger.error(f"LibGen page returned status {page_response.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"Error parsing LibGen page: {e}")
-            return False
-    
-    logger.info("Waiting 10 seconds (slow server)...")
-    time.sleep(10)
+    # Convert FlareSolverr cookies to requests format
+    cookie_dict = {}
+    if cookies:
+        for cookie in cookies:
+            cookie_dict[cookie.get("name")] = cookie.get("value")
     
     try:
-        response = scraper.get(url, timeout=300, stream=True)
+        # Use harvested cookies for authenticated downloads
+        response = requests.get(
+            url, 
+            cookies=cookie_dict,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+            timeout=300,
+            stream=True
+        )
+        
         logger.info(f"Response status: {response.status_code}")
         
         if response.status_code != 200:
@@ -428,17 +184,14 @@ def download_file(url: str, filename: str) -> bool:
                 f.write(chunk)
         
         size = save_path.stat().st_size
-        logger.info(f"Downloaded: {size} bytes")
+        logger.info(f"Downloaded {size:,} bytes")
         
+        # Check if file is too small (probably error page)
         if size < 10000:
-            logger.warning("File too small, probably error page")
-            with open(save_path, 'r', errors='ignore') as f:
-                content = f.read()[:500]
-                logger.info(f"Content preview: {content}")
+            logger.warning(f"File too small ({size} bytes), likely error page")
             save_path.unlink()
             return False
         
-        logger.info(f"SUCCESS: {save_path.name} ({size / 1024 / 1024:.2f} MB)")
         return True
         
     except Exception as e:
@@ -448,67 +201,250 @@ def download_file(url: str, filename: str) -> bool:
         return False
 
 
+def search_welib(query: str) -> dict:
+    """Search welib.org and return first result"""
+    
+    encoded_query = query.replace(' ', '%20')
+    url = f"https://welib.org/search?q={encoded_query}"
+    
+    logger.info(f"Searching: {url}")
+    
+    result = flaresolverr_request(url)
+    
+    if not result:
+        logger.error("Search failed")
+        return None
+    
+    html = result.get("html", "")
+    
+    # Save for debugging
+    with open('/tmp/welib_search.html', 'w', encoding='utf-8') as f:
+        f.write(html)
+    logger.info(f"Response length: {len(html)} characters")
+    
+    # Find MD5 links
+    md5_matches = re.findall(r'href="(/md5/[a-fA-F0-9]{32})"', html)
+    if md5_matches:
+        link = md5_matches[0]
+        logger.info(f"Found MD5 link: {link}")
+        return {
+            'link': f"https://welib.org{link}", 
+            'type': 'md5',
+            'cookies': result.get('cookies', [])
+        }
+    
+    logger.warning("No MD5 links found")
+    return None
+
+
+def get_download_links(md5: str, cookies: list = None) -> list:
+    """Get all download links from MD5 page"""
+    
+    links = []
+    
+    # Add LibGen mirror links FIRST - they often work without auth
+    libgen_mirrors = [
+        f"http://library.lol/main/{md5}",
+        f"https://libgen.li/ads.php?md5={md5}",
+        f"https://libgen.rocks/ads.php?md5={md5}",
+    ]
+    
+    for mirror in libgen_mirrors:
+        links.append({"url": mirror, "type": "libgen"})
+        logger.info(f"Added LibGen mirror: {mirror}")
+    
+    # Also get welib page for download links
+    url = f"https://welib.org/md5/{md5}"
+    
+    logger.info(f"Getting MD5 page: {url}")
+    
+    result = flaresolverr_request(url)
+    
+    if result:
+        html = result.get("html", "")
+        
+        # Save for debugging
+        with open('/tmp/welib_md5.html', 'w', encoding='utf-8') as f:
+            f.write(html)
+        
+        # Extract download links
+        # Pattern 1: Slow download links
+        slow_matches = re.findall(r'href="([^"]*(?:slow_download|slow|free)[^"]*)"', html, re.IGNORECASE)
+        for link in slow_matches:
+            if not link.startswith('http'):
+                link = f"https://welib.org{link}"
+            links.append({"url": link, "type": "welib", "cookies": result.get("cookies", [])})
+            logger.info(f"Found slow download link: {link}")
+        
+        # Pattern 2: IPFS links
+        ipfs_cid_matches = re.findall(r'ipfs://([a-zA-Z0-9]{46,})', html)
+        for cid in ipfs_cid_matches:
+            gateway_url = f"https://ipfs.io/ipfs/{cid}"
+            links.append({"url": gateway_url, "type": "ipfs"})
+            logger.info(f"Found IPFS CID: {gateway_url}")
+        
+        # Pattern 3: Fast download links
+        fast_matches = re.findall(r'href="([^"]*(?:fast_download|fast)[^"]*)"', html, re.IGNORECASE)
+        for link in fast_matches:
+            if not link.startswith('http'):
+                link = f"https://welib.org{link}"
+            links.append({"url": link, "type": "welib", "cookies": result.get("cookies", [])})
+            logger.info(f"Found fast download link: {link}")
+    
+    logger.info(f"Total download links found: {len(links)}")
+    return links
+
+
+def try_libgen_download(url: str, filename: str) -> bool:
+    """Try to download from LibGen mirror page"""
+    
+    logger.info(f"Trying LibGen mirror: {url}")
+    
+    # Use FlareSolverr to get the LibGen page
+    result = flaresolverr_request(url)
+    
+    if not result:
+        return False
+    
+    html = result.get("html", "")
+    
+    # Look for actual download links in the LibGen page
+    download_patterns = [
+        r'href="(https?://[^"]+/get\.php\?[^"]+)"',
+        r'href="(https?://download[^"]+)"',
+        r'<a href="([^"]+)"[^>]*>GET</a>',
+        r'<a href="([^"]+)"[^>]*>Cloudflare</a>',
+        r'<a href="([^"]+)"[^>]*>IPFS\.io</a>',
+    ]
+    
+    for pattern in download_patterns:
+        matches = re.findall(pattern, html, re.IGNORECASE)
+        if matches:
+            download_url = matches[0]
+            if not download_url.startswith('http'):
+                # Handle relative URLs
+                from urllib.parse import urljoin
+                download_url = urljoin(url, download_url)
+            
+            logger.info(f"Found LibGen download link: {download_url}")
+            
+            # Try direct download
+            if download_direct(download_url, filename, result.get("cookies", [])):
+                return True
+    
+    logger.warning("Could not find download link in LibGen page")
+    return False
+
+
 def process_search(query: str) -> bool:
     """Process a single search query"""
     
-    logger.info("=" * 60)
     logger.info(f"Processing: {query}")
-    logger.info("=" * 60)
     
-    # Search
-    result = search_welib(query)
-    if not result:
-        logger.error("No search results")
+    # Search for books
+    search_result = search_welib(query)
+    
+    if not search_result:
+        logger.error(f"No results found for: {query}")
         return False
     
-    # Get ALL download links
-    download_urls = get_download_links(result)
-    if not download_urls:
+    # Extract MD5 from link
+    md5_match = re.search(r'/md5/([a-fA-F0-9]{32})', search_result['link'])
+    if not md5_match:
+        logger.error(f"Could not extract MD5 from: {search_result['link']}")
+        return False
+    
+    md5 = md5_match.group(1)
+    logger.info(f"Found MD5: {md5}")
+    
+    # Get download links
+    download_links = get_download_links(md5, search_result.get('cookies', []))
+    
+    if not download_links:
         logger.error("No download links found")
         return False
     
-    # Try each download link until one works
-    safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', query)[:50].replace(' ', '_')
+    # Create safe filename
+    safe_name = re.sub(r'[^\w\s-]', '', query)[:50].strip().replace(' ', '_')
     filename = f"{safe_name}.pdf"
     
-    for i, url in enumerate(download_urls):
-        logger.info(f"Trying download source {i+1}/{len(download_urls)}: {url[:80]}...")
-        if download_file(url, filename):
+    # Try each download source
+    for i, link_info in enumerate(download_links):
+        url = link_info["url"]
+        link_type = link_info["type"]
+        cookies = link_info.get("cookies", [])
+        
+        logger.info(f"Trying download source {i+1}/{len(download_links)}: {url[:80]}...")
+        
+        success = False
+        
+        if link_type == "libgen":
+            success = try_libgen_download(url, filename)
+        else:
+            success = download_direct(url, filename, cookies)
+        
+        if success:
+            logger.info(f"Successfully downloaded: {filename}")
             return True
+        
         logger.warning(f"Download source {i+1} failed, trying next...")
-        time.sleep(5)  # Brief pause between attempts
+        time.sleep(3)  # Brief delay between attempts
     
     logger.error("All download sources failed")
     return False
 
 
 def main():
+    """Main entry point"""
+    
     logger.info("=" * 60)
-    logger.info("Ebook Download - welib.org with Cloudflare bypass")
+    logger.info("Ebook Download - FlareSolverr Mode")
     logger.info("=" * 60)
     
+    # Create downloads directory
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     
+    # Read search terms
     if not SEARCH_TERMS_FILE.exists():
-        logger.error("search_terms.txt not found")
+        logger.error(f"Search terms file not found: {SEARCH_TERMS_FILE}")
         sys.exit(1)
     
-    with open(SEARCH_TERMS_FILE, 'r') as f:
-        terms = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    search_terms = [
+        line.strip() 
+        for line in SEARCH_TERMS_FILE.read_text().strip().split('\n')
+        if line.strip()
+    ]
     
-    logger.info(f"Search terms: {terms}")
+    if not search_terms:
+        logger.error("No search terms provided")
+        sys.exit(1)
     
+    logger.info(f"Search terms: {search_terms}")
+    
+    # Create FlareSolverr session for cookie persistence
+    create_session()
+    
+    # Track results
     successful = []
     failed = []
     
-    for term in terms:
-        if process_search(term):
-            successful.append(term)
-        else:
-            failed.append(term)
-        
-        logger.info("Waiting 30 seconds before next search...")
-        time.sleep(30)
+    try:
+        for query in search_terms:
+            logger.info("=" * 60)
+            
+            if process_search(query):
+                successful.append(query)
+            else:
+                failed.append(query)
+            
+            # Wait between searches
+            if query != search_terms[-1]:
+                logger.info("Waiting 10 seconds before next search...")
+                time.sleep(10)
+    
+    finally:
+        # Clean up session
+        destroy_session()
     
     # Summary
     logger.info("")
@@ -518,21 +454,17 @@ def main():
     
     if successful:
         logger.info(f"Successful ({len(successful)}):")
-        for t in successful:
-            logger.info(f"  - {t}")
+        for q in successful:
+            logger.info(f"  - {q}")
     
     if failed:
         logger.info(f"Failed ({len(failed)}):")
-        for t in failed:
-            logger.info(f"  - {t}")
+        for q in failed:
+            logger.info(f"  - {q}")
     
-    # List files
-    if DOWNLOADS_DIR.exists():
-        files = list(DOWNLOADS_DIR.iterdir())
-        if files:
-            logger.info("Downloaded files:")
-            for f in files:
-                logger.info(f"  - {f.name} ({f.stat().st_size / 1024 / 1024:.2f} MB)")
+    # Exit with error if all failed
+    if not successful and failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
