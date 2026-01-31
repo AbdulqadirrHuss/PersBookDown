@@ -151,7 +151,14 @@ def get_download_link(result: dict) -> str:
     """Get download link from result"""
     
     if result['type'] == 'md5':
-        return get_download_from_md5(result['md5'])
+        # Extract MD5 from link URL like /md5/abc123... or https://welib.org/md5/abc123...
+        link = result['link']
+        md5_match = re.search(r'/md5/([a-fA-F0-9]{32})', link)
+        if md5_match:
+            return get_download_from_md5(md5_match.group(1))
+        else:
+            logger.error(f"Could not extract MD5 from link: {link}")
+            return None
     elif result['type'] == 'direct':
         return result['link']
     else:
