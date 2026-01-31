@@ -249,18 +249,23 @@ def extract_download_links(html: str) -> list:
             links.append(link)
             logger.info(f"Found slow download link: {link}")
     
-    # Pattern 2: IPFS CID links - convert to HTTP gateway
+    # Pattern 2: IPFS CID links - convert to HTTP gateways
     # Look for ipfs:// protocol links with CID
     ipfs_cid_matches = re.findall(r'ipfs://([a-zA-Z0-9]{46,})', html)
     for cid in ipfs_cid_matches:
-        # Convert to cloudflare IPFS gateway (most reliable)
-        gateway_url = f"https://cloudflare-ipfs.com/ipfs/{cid}"
-        if gateway_url not in links:
-            links.append(gateway_url)
-            logger.info(f"Found IPFS CID, using gateway: {gateway_url}")
+        # Use multiple IPFS gateways for reliability
+        gateway_urls = [
+            f"https://ipfs.io/ipfs/{cid}",
+            f"https://dweb.link/ipfs/{cid}",
+            f"https://w3s.link/ipfs/{cid}",
+        ]
+        for gateway_url in gateway_urls:
+            if gateway_url not in links:
+                links.append(gateway_url)
+                logger.info(f"Found IPFS CID, using gateway: {gateway_url}")
     
-    # Also try to find direct gateway links
-    gateway_matches = re.findall(r'href="(https?://[^"]*(?:cloudflare-ipfs|ipfs\.io|dweb\.link)/ipfs/[^"]+)"', html, re.IGNORECASE)
+    # Also try to find direct gateway links in page
+    gateway_matches = re.findall(r'href="(https?://[^"]*(?:ipfs\.io|dweb\.link|w3s\.link|gateway\.pinata\.cloud)/ipfs/[^"]+)"', html, re.IGNORECASE)
     for link in gateway_matches:
         if link not in links:
             links.append(link)
@@ -283,15 +288,18 @@ def extract_download_links(html: str) -> list:
             links.append(link)
             logger.info(f"Found fast download link: {link}")
     
-    # Pattern 5: General download links
+    
+    # Pattern 5: General download links (but exclude account pages)
     download_matches = re.findall(r'href="([^"]*download[^"]*)"', html, re.IGNORECASE)
     for link in download_matches:
-        if 'slow' not in link and 'fast' not in link:  # Don't duplicate
-            if not link.startswith('http'):
-                link = f"https://welib.org{link}"
-            if link not in links:
-                links.append(link)
-                logger.info(f"Found download link: {link}")
+        # Skip account pages, slow/fast (already captured)
+        if 'slow' in link or 'fast' in link or 'account' in link:
+            continue
+        if not link.startswith('http'):
+            link = f"https://welib.org{link}"
+        if link not in links:
+            links.append(link)
+            logger.info(f"Found download link: {link}")
     
     # Pattern 6: LibGen mirrors
     libgen_matches = re.findall(r'href="(https?://[^"]*(?:libgen|library\.lol|gen\.lib)[^"]*)"', html, re.IGNORECASE)
