@@ -1,9 +1,2 @@
-# Browser impersonation (bypasses TLS fingerprinting)
-curl_cffi>=0.5.0
-
-# HTML parsing
-beautifulsoup4>=4.11.0
-lxml>=4.9.0
-
-# Tor SOCKS proxy support
-pysocks>=1.7.1
+# Cloudflare bypass
+cloudscraper>=1.2.71

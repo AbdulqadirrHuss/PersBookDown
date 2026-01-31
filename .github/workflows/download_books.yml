@@ -17,6 +17,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cloudscraper
+      
       - name: Create directories
         run: mkdir -p downloads
       
@@ -27,10 +37,8 @@ jobs:
           echo "Search terms:"
           cat -n search_terms.txt
       
-      - name: Download books from welib.org
-        run: |
-          chmod +x download.sh
-          ./download.sh
+      - name: Download books with Cloudflare bypass
+        run: python download_books.py
         continue-on-error: true
       
       - name: Show debug info
@@ -40,10 +48,10 @@ jobs:
           ls -lah downloads/ 2>/dev/null || echo "No files"
           echo ""
           echo "=== Debug: Search Response (first 3000 chars) ==="
-          head -c 3000 /tmp/welib_search_response.html 2>/dev/null || echo "No search response"
+          head -c 3000 /tmp/welib_search.html 2>/dev/null || echo "No search response"
           echo ""
           echo "=== Debug: MD5 Response (first 3000 chars) ==="
-          head -c 3000 /tmp/welib_md5_response.html 2>/dev/null || echo "No MD5 response"
+          head -c 3000 /tmp/welib_md5.html 2>/dev/null || echo "No MD5 response"
       
       - name: Upload downloads
         uses: actions/upload-artifact@v4
