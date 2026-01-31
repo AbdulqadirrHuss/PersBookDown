@@ -1,19 +1,13 @@
 name: Download Books
 
 on:
-  # Manual trigger with book list input
+  # Manual trigger with search terms input
   workflow_dispatch:
     inputs:
-      books:
-        description: 'Books to download (one per line: Title - Author)'
-        required: false
-        default: ''
+      search_terms:
+        description: 'Search terms separated by commas (e.g., "1984 orwell, dune herbert, gatsby")'
+        required: true
         type: string
-  
-  # Automatic trigger when books.txt is updated
-  push:
-    paths:
-      - 'books.txt'
 
 jobs:
   download:
@@ -42,13 +36,12 @@ jobs:
       - name: Create downloads directory
         run: mkdir -p downloads
       
-      - name: Update books.txt from input
-        if: ${{ github.event.inputs.books != '' }}
+      - name: Create search list from input
         run: |
-          echo "Updating books.txt with user input..."
-          echo "${{ github.event.inputs.books }}" > books.txt
-          echo "Books to download:"
-          cat books.txt
+          echo "Creating search_terms.txt from user input..."
+          echo '${{ github.event.inputs.search_terms }}' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' > search_terms.txt
+          echo "Search terms to process:"
+          cat -n search_terms.txt
       
       - name: Setup VPN and test connectivity
         id: vpn
@@ -68,7 +61,7 @@ jobs:
       - name: List downloaded files
         run: |
           echo "=== Downloaded Files ==="
-          ls -lah downloads/ 2>/dev/null || echo "No files downloaded"
+          ls -lah downloads/ 2>/dev/null || echo "No files in downloads/"
           echo ""
           echo "=== File count ==="
           find downloads/ -type f 2>/dev/null | wc -l || echo "0"
