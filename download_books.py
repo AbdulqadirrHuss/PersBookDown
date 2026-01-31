@@ -166,8 +166,25 @@ def get_download_link(result: dict) -> str:
 
 
 def get_download_from_md5(md5: str) -> list:
-    """Get all download links from MD5 page"""
+    """Get all download links from MD5 - including LibGen mirrors"""
     
+    links = []
+    
+    # Add LibGen mirror links FIRST - they often work without auth
+    # These use the MD5 hash directly to download
+    libgen_mirrors = [
+        f"https://libgen.li/ads.php?md5={md5}",
+        f"https://libgen.rocks/ads.php?md5={md5}",
+        f"http://library.lol/main/{md5}",
+        f"https://libgen.is/book/index.php?md5={md5}",
+        f"https://libgen.rs/book/index.php?md5={md5}",
+    ]
+    
+    for mirror in libgen_mirrors:
+        links.append(mirror)
+        logger.info(f"Added LibGen mirror: {mirror}")
+    
+    # Also try welib page for additional links
     url = f"https://welib.org/md5/{md5}"
     
     logger.info(f"Getting MD5 page: {url}")
@@ -182,14 +199,16 @@ def get_download_from_md5(md5: str) -> list:
         with open('/tmp/welib_md5.html', 'w', encoding='utf-8') as f:
             f.write(response.text)
         
-        if response.status_code != 200:
-            return []
-        
-        return extract_download_links(response.text)
+        if response.status_code == 200:
+            welib_links = extract_download_links(response.text)
+            for link in welib_links:
+                if link not in links:
+                    links.append(link)
         
     except Exception as e:
         logger.error(f"Error getting MD5 page: {e}")
-        return []
+    
+    return links
 
 
 def get_download_from_page(url: str) -> list:
@@ -323,12 +342,53 @@ def extract_download_link(html: str) -> str:
 
 
 def download_file(url: str, filename: str) -> bool:
-    """Download file from URL"""
+    """Download file from URL - handles LibGen pages that require parsing"""
     
     save_path = DOWNLOADS_DIR / filename
     
     logger.info(f"Downloading: {url}")
     logger.info(f"Saving as: {filename}")
+    
+    # Check if this is a LibGen page URL that needs parsing
+    if any(domain in url for domain in ['libgen.li', 'libgen.rocks', 'libgen.is', 'libgen.rs', 'library.lol']):
+        logger.info("Detected LibGen URL, parsing page for download link...")
+        time.sleep(3)
+        try:
+            page_response = scraper.get(url, timeout=60)
+            if page_response.status_code == 200:
+                # LibGen pages have download links with GET pattern or direct file links
+                download_patterns = [
+                    r'href="(https?://[^"]+/get\.php\?[^"]+)"',
+                    r'href="(https?://download[^"]+)"',
+                    r'href="(https?://[^"]+\.pdf)"',
+                    r'href="(https?://[^"]+\.epub)"',
+                    r'<a href="([^"]+)"[^>]*>GET</a>',
+                    r'<a href="([^"]+)"[^>]*>Cloudflare</a>',
+                    r'<a href="([^"]+)"[^>]*>IPFS\.io</a>',
+                ]
+                for pattern in download_patterns:
+                    matches = re.findall(pattern, page_response.text, re.IGNORECASE)
+                    if matches:
+                        url = matches[0]
+                        if not url.startswith('http'):
+                            # Handle relative URLs
+                            from urllib.parse import urljoin
+                            url = urljoin(page_response.url, url)
+                        logger.info(f"Found LibGen download link: {url}")
+                        break
+                else:
+                    logger.warning("Could not find download link in LibGen page")
+                    # Save for debugging
+                    with open('/tmp/libgen_page.html', 'w', encoding='utf-8') as f:
+                        f.write(page_response.text[:5000])
+                    return False
+            else:
+                logger.error(f"LibGen page returned status {page_response.status_code}")
+                return False
+        except Exception as e:
+            logger.error(f"Error parsing LibGen page: {e}")
+            return False
+    
     logger.info("Waiting 10 seconds (slow server)...")
     time.sleep(10)
     
