@@ -45,6 +45,7 @@ LIBGEN_MIRRORS = [
 # Anna's Archive mirrors
 ANNAS_MIRRORS = [
     "https://annas-archive.org",
+    "https://annas-archive.gs",
     "https://annas-archive.se",
     "https://annas-archive.li",
 ]

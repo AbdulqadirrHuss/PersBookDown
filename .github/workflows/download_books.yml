@@ -1,8 +1,14 @@
 name: Download Books
 
 on:
-  # Manual trigger with button in Actions tab
+  # Manual trigger with book list input
   workflow_dispatch:
+    inputs:
+      books:
+        description: 'Books to download (one per line: Title - Author)'
+        required: false
+        default: ''
+        type: string
   
   # Automatic trigger when books.txt is updated
   push:
@@ -31,12 +37,21 @@ jobs:
       - name: Install OpenVPN
         run: |
           sudo apt-get update
-          sudo apt-get install -y openvpn
+          sudo apt-get install -y openvpn resolvconf
       
       - name: Create downloads directory
         run: mkdir -p downloads
       
-      - name: Test connectivity and setup VPN if needed
+      - name: Update books.txt from input
+        if: ${{ github.event.inputs.books != '' }}
+        run: |
+          echo "Updating books.txt with user input..."
+          echo "${{ github.event.inputs.books }}" > books.txt
+          echo "Books to download:"
+          cat books.txt
+      
+      - name: Setup VPN and test connectivity
+        id: vpn
         run: |
           python vpn_helper.py
         continue-on-error: true
@@ -48,12 +63,15 @@ jobs:
       - name: Disconnect VPN
         if: always()
         run: |
-          sudo killall openvpn || true
+          sudo killall openvpn 2>/dev/null || true
       
       - name: List downloaded files
         run: |
           echo "=== Downloaded Files ==="
-          ls -lah downloads/ || echo "No files downloaded"
+          ls -lah downloads/ 2>/dev/null || echo "No files downloaded"
+          echo ""
+          echo "=== File count ==="
+          find downloads/ -type f 2>/dev/null | wc -l || echo "0"
       
       - name: Upload downloads as artifact
         uses: actions/upload-artifact@v4
