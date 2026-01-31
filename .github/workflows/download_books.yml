@@ -1,11 +1,10 @@
 name: Download Books
 
 on:
-  # Manual trigger with search terms input
   workflow_dispatch:
     inputs:
       search_terms:
-        description: 'Search terms separated by commas (e.g., "1984 orwell, dune herbert, gatsby")'
+        description: 'Search terms separated by commas (e.g., "1984 orwell, dune herbert")'
         required: true
         type: string
 
@@ -23,48 +22,43 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
       
-      - name: Install dependencies
+      - name: Install Tor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor
+          sudo service tor start
+          sleep 5
+          echo "Checking Tor status..."
+          sudo service tor status || true
+      
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
-      - name: Install OpenVPN
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y openvpn resolvconf
       
       - name: Create downloads directory
         run: mkdir -p downloads
       
       - name: Create search list from input
         run: |
-          echo "Creating search_terms.txt from user input..."
+          echo "Parsing search terms..."
           echo '${{ github.event.inputs.search_terms }}' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' > search_terms.txt
-          echo "Search terms to process:"
+          echo "Search terms:"
           cat -n search_terms.txt
       
-      - name: Setup VPN and test connectivity
-        id: vpn
+      - name: Verify Tor is working
         run: |
-          python vpn_helper.py
-        continue-on-error: true
+          curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip 2>/dev/null || echo "Tor check failed, continuing anyway..."
       
       - name: Run download script
         run: python download_books.py
         continue-on-error: true
       
-      - name: Disconnect VPN
-        if: always()
-        run: |
-          sudo killall openvpn 2>/dev/null || true
-      
       - name: List downloaded files
         run: |
           echo "=== Downloaded Files ==="
-          ls -lah downloads/ 2>/dev/null || echo "No files in downloads/"
-          echo ""
-          echo "=== File count ==="
-          find downloads/ -type f 2>/dev/null | wc -l || echo "0"
+          ls -lah downloads/ 2>/dev/null || echo "No files"
+          find downloads/ -type f 2>/dev/null | wc -l
       
       - name: Upload downloads as artifact
         uses: actions/upload-artifact@v4

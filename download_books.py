@@ -2,8 +2,8 @@
 """
 Ebook Download Automation Script
 
-Searches for books from Library Genesis (LibGen) and Anna's Archive,
-prioritizing .epub and .pdf formats, and downloads them to the downloads/ folder.
+Uses curl_cffi for browser TLS impersonation and Tor for IP masking.
+Searches LibGen and Anna's Archive for books.
 """
 
 import os
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, List
 from urllib.parse import urljoin, quote_plus
 
-import requests
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 
 # Configure logging
@@ -28,17 +28,20 @@ logger = logging.getLogger(__name__)
 # Constants
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
-BOOKS_FILE = Path("books.txt")  # Fallback
-REQUEST_TIMEOUT = 30
+BOOKS_FILE = Path("books.txt")
+REQUEST_TIMEOUT = 45
 RETRY_ATTEMPTS = 3
-RETRY_DELAY = 2
+RETRY_DELAY = 3
 
-# LibGen mirrors to try (ordered by typical reliability)
+# Tor SOCKS5 proxy (localhost:9050 when Tor is running)
+TOR_PROXY = "socks5://127.0.0.1:9050"
+
+# LibGen mirrors
 LIBGEN_MIRRORS = [
-    "https://libgen.li",
     "https://libgen.is",
-    "https://libgen.rs", 
+    "https://libgen.rs",
     "https://libgen.st",
+    "https://libgen.li",
 ]
 
 # Anna's Archive mirrors
@@ -48,13 +51,34 @@ ANNAS_MIRRORS = [
     "https://annas-archive.se",
 ]
 
-# Preferred formats in order of priority
+# Preferred formats
 PREFERRED_FORMATS = ['epub', 'pdf', 'mobi', 'azw3']
 
-# User agent for requests
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-}
+# Check if Tor proxy is available
+def check_tor_proxy():
+    """Check if Tor SOCKS proxy is running."""
+    try:
+        response = requests.get(
+            "https://check.torproject.org/api/ip",
+            impersonate="chrome110",
+            proxies={"https": TOR_PROXY, "http": TOR_PROXY},
+            timeout=15
+        )
+        data = response.json()
+        if data.get("IsTor"):
+            logger.info(f"✓ Tor is working! Exit IP: {data.get('IP', 'unknown')}")
+            return True
+    except Exception as e:
+        logger.debug(f"Tor check failed: {e}")
+    return False
+
+USE_TOR = check_tor_proxy()
+
+def get_proxies():
+    """Return proxy config if Tor is available."""
+    if USE_TOR:
+        return {"https": TOR_PROXY, "http": TOR_PROXY}
+    return None
 
 
 def sanitize_filename(filename: str) -> str:
@@ -64,25 +88,20 @@ def sanitize_filename(filename: str) -> str:
 
 
 def parse_search_terms() -> List[str]:
-    """
-    Parse search terms from search_terms.txt (comma-separated workflow input)
-    or fall back to books.txt.
-    """
+    """Parse search terms from search_terms.txt or books.txt."""
     search_terms = []
     
-    # Try search_terms.txt first (from workflow input)
     if SEARCH_TERMS_FILE.exists():
-        logger.info(f"Reading search terms from {SEARCH_TERMS_FILE}")
+        logger.info(f"Reading from {SEARCH_TERMS_FILE}")
         with open(SEARCH_TERMS_FILE, 'r', encoding='utf-8') as f:
             for line in f:
                 term = line.strip()
                 if term and not term.startswith('#'):
                     search_terms.append(term)
-                    logger.info(f"  Search term: '{term}'")
+                    logger.info(f"  → {term}")
         if search_terms:
             return search_terms
     
-    # Fall back to books.txt
     if BOOKS_FILE.exists():
         logger.info(f"Reading from {BOOKS_FILE}")
         with open(BOOKS_FILE, 'r', encoding='utf-8') as f:
@@ -90,29 +109,36 @@ def parse_search_terms() -> List[str]:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                # Handle old "Title - Author" format by just using as search term
                 search_terms.append(line.replace(' - ', ' '))
-                logger.info(f"  Search term: '{line}'")
+                logger.info(f"  → {line}")
     
     return search_terms
 
 
 def make_request(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[requests.Response]:
-    """Make HTTP request with retry logic."""
+    """Make HTTP request with browser impersonation."""
+    proxies = get_proxies()
+    
     for attempt in range(RETRY_ATTEMPTS):
         try:
-            response = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+            response = requests.get(
+                url,
+                impersonate="chrome110",  # Impersonate Chrome 110 TLS fingerprint
+                proxies=proxies,
+                timeout=timeout,
+                allow_redirects=True
+            )
             response.raise_for_status()
             return response
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Request failed (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {e}")
+        except Exception as e:
+            logger.warning(f"Request failed (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {type(e).__name__}")
             if attempt < RETRY_ATTEMPTS - 1:
                 time.sleep(RETRY_DELAY)
     return None
 
 
 def get_best_format(results: List[dict]) -> Optional[dict]:
-    """Select the best format from available options based on priority."""
+    """Select the best format from available options."""
     for preferred in PREFERRED_FORMATS:
         for item in results:
             ext = item.get('extension', '').lower().strip('.')
@@ -122,17 +148,17 @@ def get_best_format(results: List[dict]) -> Optional[dict]:
 
 
 # ============================================================================
-# Library Genesis Functions
+# Library Genesis
 # ============================================================================
 
 def search_libgen(search_term: str) -> Optional[dict]:
-    """Search Library Genesis for a book."""
+    """Search Library Genesis."""
     for mirror in LIBGEN_MIRRORS:
         try:
-            search_url = f"{mirror}/search.php?req={quote_plus(search_term)}&lg_topic=libgen&open=0&view=simple&res=25&phrase=1&column=def"
-            logger.info(f"Searching LibGen: {mirror}")
+            url = f"{mirror}/search.php?req={quote_plus(search_term)}&lg_topic=libgen&open=0&view=simple&res=25&phrase=1&column=def"
+            logger.info(f"Trying LibGen: {mirror}")
             
-            response = make_request(search_url)
+            response = make_request(url)
             if not response:
                 continue
             
@@ -141,65 +167,51 @@ def search_libgen(search_term: str) -> Optional[dict]:
             # Find results table
             tables = soup.find_all('table', class_='c')
             if not tables:
-                # Try alternative table structure
-                tables = soup.find_all('table')
-                tables = [t for t in tables if t.find('tr') and len(t.find_all('tr')) > 1]
+                tables = [t for t in soup.find_all('table') if len(t.find_all('tr')) > 2]
             
             if not tables:
-                logger.debug(f"No results table found on {mirror}")
                 continue
             
-            results_table = tables[0]
-            rows = results_table.find_all('tr')[1:]  # Skip header
-            
+            rows = tables[0].find_all('tr')[1:]  # Skip header
             results = []
-            for row in rows[:10]:
+            
+            for row in rows[:5]:
                 cols = row.find_all('td')
                 if len(cols) < 8:
                     continue
                 
                 try:
-                    # Extract info from columns
-                    title_col = cols[2] if len(cols) > 2 else cols[1]
-                    author_col = cols[1] if len(cols) > 1 else None
-                    
                     result = {
-                        'title': title_col.get_text(strip=True)[:100],
-                        'author': author_col.get_text(strip=True)[:50] if author_col else '',
+                        'title': cols[2].get_text(strip=True)[:100],
+                        'author': cols[1].get_text(strip=True)[:50],
                         'extension': cols[8].get_text(strip=True).lower() if len(cols) > 8 else 'pdf',
-                        'size': cols[7].get_text(strip=True) if len(cols) > 7 else '',
                         'mirror': mirror,
                     }
                     
                     # Get download link
-                    mirrors_col = cols[9] if len(cols) > 9 else cols[-1]
-                    links = mirrors_col.find_all('a', href=True)
+                    links = cols[9].find_all('a', href=True) if len(cols) > 9 else cols[-1].find_all('a', href=True)
                     if links:
                         result['download_page'] = links[0]['href']
-                    
-                    if result.get('download_page'):
                         results.append(result)
-                except Exception as e:
-                    logger.debug(f"Error parsing row: {e}")
+                except:
                     continue
             
             if results:
                 best = get_best_format(results)
                 if best:
-                    logger.info(f"Found: {best['title'][:50]}... ({best['extension']})")
+                    logger.info(f"✓ Found: {best['title'][:40]}... ({best['extension']})")
                     return best
                     
         except Exception as e:
-            logger.error(f"LibGen search error on {mirror}: {e}")
+            logger.debug(f"LibGen error on {mirror}: {e}")
             continue
     
     return None
 
 
 def download_from_libgen(book_info: dict, save_path: Path) -> bool:
-    """Download a book from Library Genesis."""
+    """Download from LibGen mirror page."""
     download_page = book_info.get('download_page', '')
-    
     if not download_page:
         return False
     
@@ -207,64 +219,43 @@ def download_from_libgen(book_info: dict, save_path: Path) -> bool:
         if not download_page.startswith('http'):
             download_page = urljoin(book_info['mirror'], download_page)
         
-        logger.info(f"Accessing download page...")
+        logger.info("Accessing download page...")
         response = make_request(download_page)
-        
         if not response:
             return False
         
         soup = BeautifulSoup(response.text, 'lxml')
         
-        # Find download link
+        # Find GET link
         download_link = None
         for link in soup.find_all('a', href=True):
-            href = link['href']
             text = link.get_text(strip=True).lower()
-            if 'get' in text or 'download' in text or 'cloudflare' in href.lower():
-                download_link = href
+            if 'get' in text or 'download' in text:
+                download_link = link['href']
                 break
         
         if not download_link:
-            for link in soup.find_all('a', href=True):
-                href = link['href']
-                if any(ext in href.lower() for ext in ['.epub', '.pdf', '.mobi']):
-                    download_link = href
-                    break
-        
-        if not download_link:
-            # Try finding h2 with download link
             h2 = soup.find('h2')
-            if h2:
-                link = h2.find('a', href=True)
-                if link:
-                    download_link = link['href']
+            if h2 and h2.find('a', href=True):
+                download_link = h2.find('a')['href']
         
         if not download_link:
-            logger.error("Could not find download link")
             return False
         
-        logger.info(f"Downloading file...")
+        logger.info("Downloading file...")
         file_response = make_request(download_link, timeout=120)
-        
         if not file_response:
             return False
         
-        # Check if we got actual file content
-        content_type = file_response.headers.get('content-type', '')
-        if 'text/html' in content_type and len(file_response.content) < 10000:
-            logger.warning("Got HTML instead of file, trying to extract link")
+        # Verify it's a real file
+        if len(file_response.content) < 1000:
             return False
         
         with open(save_path, 'wb') as f:
             f.write(file_response.content)
         
-        file_size = save_path.stat().st_size
-        if file_size < 1000:  # Less than 1KB is probably an error
-            logger.warning(f"Downloaded file too small ({file_size} bytes)")
-            save_path.unlink()
-            return False
-        
-        logger.info(f"Downloaded: {save_path.name} ({file_size/1024/1024:.2f} MB)")
+        size_mb = save_path.stat().st_size / 1024 / 1024
+        logger.info(f"✓ Downloaded: {save_path.name} ({size_mb:.2f} MB)")
         return True
         
     except Exception as e:
@@ -273,76 +264,62 @@ def download_from_libgen(book_info: dict, save_path: Path) -> bool:
 
 
 # ============================================================================
-# Anna's Archive Functions  
+# Anna's Archive
 # ============================================================================
 
 def search_annas_archive(search_term: str) -> Optional[dict]:
-    """Search Anna's Archive for a book."""
+    """Search Anna's Archive."""
     for mirror in ANNAS_MIRRORS:
         try:
-            search_url = f"{mirror}/search?q={quote_plus(search_term)}"
-            logger.info(f"Searching Anna's Archive: {mirror}")
+            url = f"{mirror}/search?q={quote_plus(search_term)}"
+            logger.info(f"Trying Anna's Archive: {mirror}")
             
-            response = make_request(search_url)
+            response = make_request(url)
             if not response:
                 continue
             
             soup = BeautifulSoup(response.text, 'lxml')
-            
-            # Find book results
             results = []
-            book_links = soup.select('a[href*="/md5/"]')
             
-            for link in book_links[:10]:
-                try:
-                    href = link.get('href', '')
-                    if '/md5/' not in href:
-                        continue
-                    
-                    text = link.get_text(' ', strip=True)
-                    
-                    # Extract format from text
-                    extension = 'pdf'
-                    for fmt in PREFERRED_FORMATS:
-                        if fmt.upper() in text.upper():
-                            extension = fmt
-                            break
-                    
-                    result = {
-                        'title': text[:100],
-                        'extension': extension,
-                        'detail_url': urljoin(mirror, href),
-                        'mirror': mirror,
-                    }
-                    results.append(result)
-                    
-                except Exception as e:
-                    continue
+            for link in soup.select('a[href*="/md5/"]')[:5]:
+                href = link.get('href', '')
+                text = link.get_text(' ', strip=True)
+                
+                ext = 'pdf'
+                for fmt in PREFERRED_FORMATS:
+                    if fmt.upper() in text.upper():
+                        ext = fmt
+                        break
+                
+                results.append({
+                    'title': text[:100],
+                    'extension': ext,
+                    'detail_url': urljoin(mirror, href),
+                    'mirror': mirror,
+                })
             
             if results:
                 best = get_best_format(results)
                 if best:
-                    logger.info(f"Found: {best['title'][:50]}... ({best['extension']})")
+                    logger.info(f"✓ Found: {best['title'][:40]}... ({best['extension']})")
                     return best
                     
         except Exception as e:
-            logger.error(f"Anna's Archive error on {mirror}: {e}")
+            logger.debug(f"Anna's error on {mirror}: {e}")
             continue
     
     return None
 
 
 def download_from_annas(book_info: dict, save_path: Path) -> bool:
-    """Download a book from Anna's Archive."""
+    """Download from Anna's Archive."""
     detail_url = book_info.get('detail_url', '')
-    
     if not detail_url:
         return False
     
     try:
-        logger.info(f"Accessing book page...")
+        logger.info("Accessing book page...")
         response = make_request(detail_url)
-        
         if not response:
             return False
         
@@ -351,48 +328,35 @@ def download_from_annas(book_info: dict, save_path: Path) -> bool:
         # Find download link
         download_link = None
         for link in soup.find_all('a', href=True):
-            href = link['href']
             text = link.get_text(strip=True).lower()
-            
-            if any(x in text for x in ['slow download', 'download']):
+            if 'slow download' in text or 'download' in text:
+                href = link['href']
                 download_link = href if href.startswith('http') else urljoin(book_info['mirror'], href)
                 break
         
         if not download_link:
             return False
         
-        # Follow through to get actual file
+        # Follow through LibGen mirror if needed
         if 'libgen' in download_link.lower() or 'library.lol' in download_link.lower():
-            # Redirect to LibGen download
-            response = make_request(download_link)
-            if not response:
-                return False
-            
-            soup = BeautifulSoup(response.text, 'lxml')
-            for link in soup.find_all('a', href=True):
-                text = link.get_text(strip=True).lower()
-                if 'get' in text:
-                    download_link = link['href']
-                    break
+            resp = make_request(download_link)
+            if resp:
+                soup = BeautifulSoup(resp.text, 'lxml')
+                for link in soup.find_all('a', href=True):
+                    if 'get' in link.get_text(strip=True).lower():
+                        download_link = link['href']
+                        break
         
-        if not download_link:
-            return False
-        
-        logger.info(f"Downloading file...")
+        logger.info("Downloading file...")
         file_response = make_request(download_link, timeout=120)
-        
-        if not file_response:
+        if not file_response or len(file_response.content) < 1000:
             return False
         
         with open(save_path, 'wb') as f:
             f.write(file_response.content)
         
-        file_size = save_path.stat().st_size
-        if file_size < 1000:
-            save_path.unlink()
-            return False
-        
-        logger.info(f"Downloaded: {save_path.name} ({file_size/1024/1024:.2f} MB)")
+        size_mb = save_path.stat().st_size / 1024 / 1024
+        logger.info(f"✓ Downloaded: {save_path.name} ({size_mb:.2f} MB)")
         return True
         
     except Exception as e:
@@ -401,94 +365,86 @@ def download_from_annas(book_info: dict, save_path: Path) -> bool:
 
 
 # ============================================================================
-# Main Download Logic
+# Main
 # ============================================================================
 
 def download_book(search_term: str) -> bool:
-    """Attempt to download a book using the search term."""
+    """Download a book by search term."""
     DOWNLOADS_DIR.mkdir(exist_ok=True)
-    
     base_filename = sanitize_filename(search_term)
     
-    # Try LibGen first
-    logger.info(f"Searching LibGen...")
+    # Try LibGen
     result = search_libgen(search_term)
-    
     if result:
         ext = result.get('extension', 'pdf').strip('.')
-        save_path = DOWNLOADS_DIR / f"{base_filename}.{ext}"
-        
-        if download_from_libgen(result, save_path):
+        if download_from_libgen(result, DOWNLOADS_DIR / f"{base_filename}.{ext}"):
             return True
-        logger.warning("LibGen download failed, trying Anna's Archive...")
     
     # Try Anna's Archive
-    logger.info(f"Searching Anna's Archive...")
     result = search_annas_archive(search_term)
-    
     if result:
         ext = result.get('extension', 'pdf').strip('.')
-        save_path = DOWNLOADS_DIR / f"{base_filename}.{ext}"
-        
-        if download_from_annas(result, save_path):
+        if download_from_annas(result, DOWNLOADS_DIR / f"{base_filename}.{ext}"):
             return True
     
-    logger.error(f"Could not download: {search_term}")
+    logger.error(f"✗ Could not download: {search_term}")
     return False
 
 
 def main():
-    """Main entry point."""
-    logger.info("=" * 60)
-    logger.info("Ebook Download Automation Script")
-    logger.info("=" * 60)
+    logger.info("=" * 50)
+    logger.info("Ebook Download Automation")
+    logger.info("=" * 50)
+    
+    if USE_TOR:
+        logger.info("Using Tor proxy for anonymity")
+    else:
+        logger.info("Tor not available, using direct connection")
+    
+    logger.info("Using Chrome 110 TLS impersonation")
     
     search_terms = parse_search_terms()
-    
     if not search_terms:
-        logger.error("No search terms found. Create search_terms.txt or books.txt")
+        logger.error("No search terms found!")
         sys.exit(1)
     
-    logger.info(f"Processing {len(search_terms)} search term(s)")
+    logger.info(f"\nProcessing {len(search_terms)} search term(s)")
     
     successful = []
     failed = []
     
     for i, term in enumerate(search_terms, 1):
-        logger.info(f"\n[{i}/{len(search_terms)}] Searching: {term}")
+        logger.info(f"\n[{i}/{len(search_terms)}] {term}")
         
-        try:
-            if download_book(term):
-                successful.append(term)
-            else:
-                failed.append(term)
-        except Exception as e:
-            logger.error(f"Error: {e}")
+        if download_book(term):
+            successful.append(term)
+        else:
             failed.append(term)
         
         if i < len(search_terms):
-            time.sleep(2)
+            time.sleep(3)
     
     # Summary
-    logger.info("\n" + "=" * 60)
-    logger.info("SUMMARY")
-    logger.info("=" * 60)
+    logger.info("\n" + "=" * 50)
+    logger.info("RESULTS")
+    logger.info("=" * 50)
     
-    logger.info(f"\nSuccessful ({len(successful)}):")
-    for term in successful:
-        logger.info(f"  ✓ {term}")
+    if successful:
+        logger.info(f"\n✓ Downloaded ({len(successful)}):")
+        for t in successful:
+            logger.info(f"  - {t}")
     
     if failed:
-        logger.info(f"\nFailed ({len(failed)}):")
-        for term in failed:
-            logger.info(f"  ✗ {term}")
+        logger.info(f"\n✗ Failed ({len(failed)}):")
+        for t in failed:
+            logger.info(f"  - {t}")
     
     if DOWNLOADS_DIR.exists():
         files = list(DOWNLOADS_DIR.iterdir())
         if files:
-            logger.info(f"\nDownloaded files:")
+            logger.info(f"\nFiles in downloads/:")
             for f in files:
-                logger.info(f"  - {f.name} ({f.stat().st_size/1024/1024:.2f} MB)")
+                logger.info(f"  {f.name} ({f.stat().st_size/1024/1024:.2f} MB)")
     
     if failed and not successful:
         sys.exit(1)
