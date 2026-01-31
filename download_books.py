@@ -29,6 +29,58 @@ FLARESOLVERR_URL = "http://localhost:8191/v1"
 # Session ID for reusing Cloudflare clearance
 SESSION_ID = None
 
+# Junk domains that should NEVER be treated as download links
+JUNK_DOMAINS = [
+    'ipfs.tech',           # IPFS project homepage
+    'cloudflare.com',      # CDN provider homepage
+    'welib.org/',          # WeLib root (not a download)
+    'welib.st/',           # WeLib alternate root
+    'annas-archive.li/',   # Just the homepage, not a download
+    'github.com',          # Not a download source
+    'software.annas-archive', # Software page, not book
+]
+
+
+def is_valid_download_url(url: str, md5: str = None) -> bool:
+    """
+    Check if URL is a valid download link, not a junk/homepage link.
+    Returns True only for actual download URLs.
+    """
+    if not url:
+        return False
+    
+    # Reject ipfs:// protocol (can't be downloaded directly)
+    if url.startswith('ipfs://'):
+        logger.warning(f"Rejecting ipfs:// protocol URL (not HTTP): {url[:60]}")
+        return False
+    
+    # Must be HTTP/HTTPS
+    if not url.startswith('http://') and not url.startswith('https://'):
+        return False
+    
+    # Reject known junk domains
+    for junk in JUNK_DOMAINS:
+        if junk in url:
+            logger.warning(f"Rejecting junk URL (matches '{junk}'): {url[:60]}")
+            return False
+    
+    # If we have MD5, prefer links that contain it (more likely to be correct file)
+    # But don't reject links that don't have MD5 (IPFS gateways, etc)
+    
+    return True
+
+
+def convert_ipfs_to_gateway(ipfs_url: str) -> str:
+    """
+    Convert ipfs:// URL to HTTP gateway URL.
+    Example: ipfs://QmHash... -> https://dweb.link/ipfs/QmHash...
+    """
+    if ipfs_url.startswith('ipfs://'):
+        cid = ipfs_url[7:]  # Remove 'ipfs://'
+        # Use dweb.link as primary gateway (reliable)
+        return f"https://dweb.link/ipfs/{cid}"
+    return ipfs_url
+
 
 def flaresolverr_request(url: str, max_timeout: int = 60000) -> dict:
     """
@@ -250,8 +302,9 @@ def get_download_links(md5: str, cookies: list = None) -> list:
     ]
     
     for mirror in libgen_mirrors:
-        links.append({"url": mirror, "type": "libgen"})
-        logger.info(f"Added LibGen mirror: {mirror}")
+        if is_valid_download_url(mirror, md5):
+            links.append({"url": mirror, "type": "libgen"})
+            logger.info(f"Added LibGen mirror: {mirror}")
     
     # Also get welib page for download links
     url = f"https://welib.org/md5/{md5}"
@@ -268,30 +321,47 @@ def get_download_links(md5: str, cookies: list = None) -> list:
             f.write(html)
         
         # Extract download links
-        # Pattern 1: Slow download links
-        slow_matches = re.findall(r'href="([^"]*(?:slow_download|slow|free)[^"]*)"', html, re.IGNORECASE)
+        # Pattern 1: Slow download links (most reliable for WeLib)
+        slow_matches = re.findall(r'href="([^"]*(?:slow_download)[^"]*)"', html, re.IGNORECASE)
         for link in slow_matches:
             if not link.startswith('http'):
                 link = f"https://welib.org{link}"
-            links.append({"url": link, "type": "welib", "cookies": result.get("cookies", [])})
-            logger.info(f"Found slow download link: {link}")
+            if is_valid_download_url(link, md5):
+                links.append({"url": link, "type": "welib", "cookies": result.get("cookies", [])})
+                logger.info(f"Found slow download link: {link}")
         
-        # Pattern 2: IPFS links
-        ipfs_cid_matches = re.findall(r'ipfs://([a-zA-Z0-9]{46,})', html)
-        for cid in ipfs_cid_matches:
-            gateway_url = f"https://ipfs.io/ipfs/{cid}"
-            links.append({"url": gateway_url, "type": "ipfs"})
-            logger.info(f"Found IPFS CID: {gateway_url}")
+        # Pattern 2: IPFS protocol links - CONVERT to HTTP gateways
+        # Find ipfs:// links and convert them to multiple gateway URLs
+        ipfs_protocol_matches = re.findall(r'ipfs://([a-zA-Z0-9]{32,})', html)
+        for cid in ipfs_protocol_matches:
+            # Add multiple gateways for reliability
+            gateways = [
+                f"https://dweb.link/ipfs/{cid}",
+                f"https://ipfs.io/ipfs/{cid}",
+                f"https://gateway.pinata.cloud/ipfs/{cid}",
+            ]
+            for gateway_url in gateways:
+                if is_valid_download_url(gateway_url, md5):
+                    links.append({"url": gateway_url, "type": "ipfs"})
+                    logger.info(f"Converted IPFS to gateway: {gateway_url}")
         
-        # Pattern 3: Fast download links
-        fast_matches = re.findall(r'href="([^"]*(?:fast_download|fast)[^"]*)"', html, re.IGNORECASE)
+        # Pattern 3: Existing IPFS gateway links (already HTTP)
+        gateway_matches = re.findall(r'href="(https?://[^"]*(?:ipfs\.io|dweb\.link|gateway\.pinata)/ipfs/[^"]+)"', html, re.IGNORECASE)
+        for link in gateway_matches:
+            if is_valid_download_url(link, md5):
+                links.append({"url": link, "type": "ipfs"})
+                logger.info(f"Found IPFS gateway link: {link}")
+        
+        # Pattern 4: Fast download links (may require auth)
+        fast_matches = re.findall(r'href="([^"]*(?:fast_download)[^"]*)"', html, re.IGNORECASE)
         for link in fast_matches:
             if not link.startswith('http'):
                 link = f"https://welib.org{link}"
-            links.append({"url": link, "type": "welib", "cookies": result.get("cookies", [])})
-            logger.info(f"Found fast download link: {link}")
+            if is_valid_download_url(link, md5):
+                links.append({"url": link, "type": "welib", "cookies": result.get("cookies", [])})
+                logger.info(f"Found fast download link: {link}")
     
-    logger.info(f"Total download links found: {len(links)}")
+    logger.info(f"Total VALID download links found: {len(links)}")
     return links
 
 
@@ -308,10 +378,14 @@ def try_libgen_download(url: str, filename: str) -> bool:
     
     html = result.get("html", "")
     
+    # Save for debugging
+    with open('/tmp/libgen_page.html', 'w', encoding='utf-8') as f:
+        f.write(html[:10000])
+    
     # Look for actual download links in the LibGen page
     download_patterns = [
         r'href="(https?://[^"]+/get\.php\?[^"]+)"',
-        r'href="(https?://download[^"]+)"',
+        r'href="(https?://download[^"]+\.(?:pdf|epub|mobi|azw3))"',
         r'<a href="([^"]+)"[^>]*>GET</a>',
         r'<a href="([^"]+)"[^>]*>Cloudflare</a>',
         r'<a href="([^"]+)"[^>]*>IPFS\.io</a>',
@@ -319,12 +393,16 @@ def try_libgen_download(url: str, filename: str) -> bool:
     
     for pattern in download_patterns:
         matches = re.findall(pattern, html, re.IGNORECASE)
-        if matches:
-            download_url = matches[0]
+        for download_url in matches:
             if not download_url.startswith('http'):
                 # Handle relative URLs
                 from urllib.parse import urljoin
                 download_url = urljoin(url, download_url)
+            
+            # CRITICAL: Validate URL before attempting download
+            if not is_valid_download_url(download_url):
+                logger.warning(f"Skipping invalid/junk URL: {download_url[:60]}")
+                continue
             
             logger.info(f"Found LibGen download link: {download_url}")
             
@@ -332,7 +410,7 @@ def try_libgen_download(url: str, filename: str) -> bool:
             if download_direct(download_url, filename, result.get("cookies", [])):
                 return True
     
-    logger.warning("Could not find download link in LibGen page")
+    logger.warning("Could not find valid download link in LibGen page")
     return False
 
 
