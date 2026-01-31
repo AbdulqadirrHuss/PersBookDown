@@ -40,6 +40,28 @@ JUNK_DOMAINS = [
     'software.annas-archive', # Software page, not book
 ]
 
+# Public IPFS gateways - try many for better success rate
+IPFS_GATEWAYS = [
+    'https://dweb.link/ipfs/',
+    'https://ipfs.io/ipfs/',
+    'https://w3s.link/ipfs/',
+    'https://cf-ipfs.com/ipfs/',
+    'https://4everland.io/ipfs/',
+    'https://gateway.pinata.cloud/ipfs/',
+    'https://cloudflare-ipfs.com/ipfs/',
+    'https://ipfs.runfission.com/ipfs/',
+    'https://gateway.ipfs.io/ipfs/',
+    'https://hardbin.com/ipfs/',
+    'https://ipfs.eth.aragon.network/ipfs/',
+    'https://ipfs.fleek.co/ipfs/',
+    'https://nftstorage.link/ipfs/',
+    'https://ipfs.best-practice.se/ipfs/',
+    'https://gw3.io/ipfs/',
+]
+
+# IPFS downloads need longer timeouts (network propagation delay)
+IPFS_TIMEOUT = 90  # seconds
+
 
 def is_valid_download_url(url: str, md5: str = None) -> bool:
     """
@@ -188,8 +210,12 @@ def download_direct(url: str, filename: str, cookies: list = None) -> bool:
     
     save_path = DOWNLOADS_DIR / filename
     
-    logger.info(f"Downloading: {url}")
-    logger.info(f"Saving as: {filename}")
+    # Use longer timeout for IPFS (network propagation delay)
+    is_ipfs = 'ipfs' in url.lower() or 'dweb' in url.lower()
+    timeout = IPFS_TIMEOUT if is_ipfs else 60
+    
+    logger.info(f"Downloading: {url[:80]}...")
+    logger.info(f"Timeout: {timeout}s {'(IPFS)' if is_ipfs else ''}")
     
     # Convert FlareSolverr cookies to requests format
     cookie_dict = {}
@@ -205,7 +231,7 @@ def download_direct(url: str, filename: str, cookies: list = None) -> bool:
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             },
-            timeout=300,
+            timeout=timeout,
             stream=True
         )
         
@@ -331,19 +357,15 @@ def get_download_links(md5: str, cookies: list = None) -> list:
                 logger.info(f"Found slow download link: {link}")
         
         # Pattern 2: IPFS protocol links - CONVERT to HTTP gateways
-        # Find ipfs:// links and convert them to multiple gateway URLs
+        # Find ipfs:// links and convert them to ALL available gateways
         ipfs_protocol_matches = re.findall(r'ipfs://([a-zA-Z0-9]{32,})', html)
         for cid in ipfs_protocol_matches:
-            # Add multiple gateways for reliability
-            gateways = [
-                f"https://dweb.link/ipfs/{cid}",
-                f"https://ipfs.io/ipfs/{cid}",
-                f"https://gateway.pinata.cloud/ipfs/{cid}",
-            ]
-            for gateway_url in gateways:
+            # Use all available gateways for maximum reliability
+            for gateway in IPFS_GATEWAYS:
+                gateway_url = f"{gateway}{cid}"
                 if is_valid_download_url(gateway_url, md5):
                     links.append({"url": gateway_url, "type": "ipfs"})
-                    logger.info(f"Converted IPFS to gateway: {gateway_url}")
+            logger.info(f"Added {len(IPFS_GATEWAYS)} gateways for IPFS CID: {cid[:20]}...")
         
         # Pattern 3: Existing IPFS gateway links (already HTTP)
         gateway_matches = re.findall(r'href="(https?://[^"]*(?:ipfs\.io|dweb\.link|gateway\.pinata)/ipfs/[^"]+)"', html, re.IGNORECASE)
@@ -380,37 +402,74 @@ def try_libgen_download(url: str, filename: str) -> bool:
     
     # Save for debugging
     with open('/tmp/libgen_page.html', 'w', encoding='utf-8') as f:
-        f.write(html[:10000])
+        f.write(html[:20000])
     
-    # Look for actual download links in the LibGen page
+    logger.info(f"LibGen page size: {len(html)} chars")
+    
+    # AGGRESSIVE LibGen parsing - try many patterns
+    # LibGen HTML changes frequently, so we try multiple strategies
     download_patterns = [
+        # Pattern 1: Direct file links ending in book extensions
+        r'href="(https?://[^"]+\.(?:pdf|epub|mobi|azw3|djvu))"',
+        
+        # Pattern 2: get.php download links (common on libgen)
         r'href="(https?://[^"]+/get\.php\?[^"]+)"',
-        r'href="(https?://download[^"]+\.(?:pdf|epub|mobi|azw3))"',
-        r'<a href="([^"]+)"[^>]*>GET</a>',
-        r'<a href="([^"]+)"[^>]*>Cloudflare</a>',
-        r'<a href="([^"]+)"[^>]*>IPFS\.io</a>',
+        
+        # Pattern 3: Links with "GET" text (library.lol style)
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*GET\s*</a>',
+        r'<a[^>]+href="([^"]+)"[^>]*>.*?GET.*?</a>',
+        
+        # Pattern 4: Links inside h2 tags (common LibGen layout)
+        r'<h2[^>]*>.*?<a[^>]+href="([^"]+)"',
+        
+        # Pattern 5: Cloudflare/IPFS buttons
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*Cloudflare\s*</a>',
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*IPFS\.io\s*</a>',
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*Infura\s*</a>',
+        
+        # Pattern 6: Download buttons with various text
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*Download\s*</a>',
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*\[1\]\s*</a>',  # [1], [2] etc buttons
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*\[2\]\s*</a>',
+        
+        # Pattern 7: Any link containing 'download' or 'get'
+        r'href="(https?://[^"]*(?:download|/get/)[^"]*)"',
+        
+        # Pattern 8: Library.lol specific - main download div
+        r'<div[^>]*id="download"[^>]*>.*?href="([^"]+)"',
     ]
     
-    for pattern in download_patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE)
-        for download_url in matches:
-            if not download_url.startswith('http'):
-                # Handle relative URLs
-                from urllib.parse import urljoin
-                download_url = urljoin(url, download_url)
-            
-            # CRITICAL: Validate URL before attempting download
-            if not is_valid_download_url(download_url):
-                logger.warning(f"Skipping invalid/junk URL: {download_url[:60]}")
-                continue
-            
-            logger.info(f"Found LibGen download link: {download_url}")
-            
-            # Try direct download
-            if download_direct(download_url, filename, result.get("cookies", [])):
-                return True
+    tried_urls = set()
     
-    logger.warning("Could not find valid download link in LibGen page")
+    for pattern in download_patterns:
+        try:
+            matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
+            for download_url in matches:
+                # Skip if already tried
+                if download_url in tried_urls:
+                    continue
+                tried_urls.add(download_url)
+                
+                if not download_url.startswith('http'):
+                    # Handle relative URLs
+                    from urllib.parse import urljoin
+                    download_url = urljoin(url, download_url)
+                
+                # CRITICAL: Validate URL before attempting download
+                if not is_valid_download_url(download_url):
+                    logger.debug(f"Skipping invalid URL: {download_url[:50]}")
+                    continue
+                
+                logger.info(f"Trying LibGen link: {download_url[:80]}")
+                
+                # Try direct download
+                if download_direct(download_url, filename, result.get("cookies", [])):
+                    return True
+        except Exception as e:
+            logger.debug(f"Pattern failed: {e}")
+            continue
+    
+    logger.warning(f"Could not find valid download in LibGen page (tried {len(tried_urls)} URLs)")
     return False
 
 
