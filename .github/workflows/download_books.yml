@@ -40,8 +40,6 @@ jobs:
       - name: Download books with Cloudflare bypass
         run: python download_books.py
         continue-on-error: true
-        env:
-          PROXY_URL: ${{ secrets.PROXY_URL }}
       
       - name: Show debug info
         if: always()
