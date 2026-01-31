@@ -16,48 +16,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-      
-      - name: Install Tor
+      - name: Install libgen-cli
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tor
-          sudo service tor start
-          sleep 5
-          echo "Checking Tor status..."
-          sudo service tor status || true
-      
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          echo "=== Installing libgen-cli ==="
+          # Download latest release
+          curl -sL https://github.com/ciehanski/libgen-cli/releases/latest/download/libgen-cli_Linux_x86_64.tar.gz -o libgen-cli.tar.gz
+          tar -xzf libgen-cli.tar.gz
+          chmod +x libgen-cli
+          ./libgen-cli --version || echo "Version check failed, but binary may still work"
+          echo "=== libgen-cli installed ==="
       
       - name: Create downloads directory
         run: mkdir -p downloads
       
-      - name: Create search list from input
+      - name: Parse search terms and download
         run: |
-          echo "Parsing search terms..."
+          echo "=== Parsing search terms ==="
           echo '${{ github.event.inputs.search_terms }}' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' > search_terms.txt
-          echo "Search terms:"
           cat -n search_terms.txt
-      
-      - name: Verify Tor is working
-        run: |
-          curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip 2>/dev/null || echo "Tor check failed, continuing anyway..."
-      
-      - name: Run download script
-        run: python download_books.py
-        continue-on-error: true
+          
+          echo ""
+          echo "=== Downloading books via IPFS ==="
+          
+          while IFS= read -r term; do
+            echo ""
+            echo "----------------------------------------"
+            echo "Searching: $term"
+            echo "----------------------------------------"
+            
+            # Use libgen-cli with IPFS flag for gateway downloads
+            # -o specifies output directory
+            # --ipfs forces download via IPFS gateways
+            ./libgen-cli download --ipfs -o downloads/ "$term" || echo "Failed: $term"
+            
+            echo "Waiting 3 seconds..."
+            sleep 3
+          done < search_terms.txt
       
       - name: List downloaded files
         run: |
           echo "=== Downloaded Files ==="
-          ls -lah downloads/ 2>/dev/null || echo "No files"
+          ls -lah downloads/ 2>/dev/null || echo "No files downloaded"
+          echo ""
+          echo "File count:"
           find downloads/ -type f 2>/dev/null | wc -l
       
       - name: Upload downloads as artifact
