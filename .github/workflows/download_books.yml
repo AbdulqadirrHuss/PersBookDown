@@ -16,11 +16,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
       - name: Create downloads directory
         run: mkdir -p downloads
       
@@ -30,43 +25,16 @@ jobs:
           echo '${{ github.event.inputs.search_terms }}' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' > search_terms.txt
           cat -n search_terms.txt
       
-      - name: Download books via libgen-downloader
+      - name: Download books
         run: |
-          echo "=== Installing libgen-downloader ==="
-          npm install -g libgen-downloader
-          
-          echo ""
-          echo "=== Downloading books ==="
-          
-          while IFS= read -r term; do
-            echo ""
-            echo "========================================"
-            echo "Searching: $term"
-            echo "========================================"
-            
-            # libgen-downloader search and download
-            # Use timeout to prevent hanging on interactive prompts
-            # -d downloads the first result automatically
-            timeout 120 libgen-downloader -s "$term" -d || echo "FAILED or TIMEOUT: $term"
-            
-            # Wait between searches
-            sleep 3
-          done < search_terms.txt
-          
-          # Move any downloaded files to downloads folder
-          echo ""
-          echo "=== Moving downloaded files ==="
-          mv *.pdf downloads/ 2>/dev/null || true
-          mv *.epub downloads/ 2>/dev/null || true
-          mv *.mobi downloads/ 2>/dev/null || true
-          find . -maxdepth 1 -type f \( -name "*.pdf" -o -name "*.epub" -o -name "*.mobi" \) -exec mv {} downloads/ \; 2>/dev/null || true
+          chmod +x download.sh
+          ./download.sh
       
       - name: List downloaded files
         run: |
           echo "=== Downloaded Files ==="
           ls -lah downloads/ 2>/dev/null || echo "No files"
           echo ""
-          echo "=== File count ==="
           find downloads/ -type f 2>/dev/null | wc -l
       
       - name: Upload downloads as artifact
