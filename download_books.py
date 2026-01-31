@@ -249,12 +249,22 @@ def extract_download_links(html: str) -> list:
             links.append(link)
             logger.info(f"Found slow download link: {link}")
     
-    # Pattern 2: IPFS links (reliable, no auth needed)
-    ipfs_matches = re.findall(r'href="([^"]*(?:ipfs|cloudflare-ipfs|dweb)[^"]*)"', html, re.IGNORECASE)
-    for link in ipfs_matches:
+    # Pattern 2: IPFS CID links - convert to HTTP gateway
+    # Look for ipfs:// protocol links with CID
+    ipfs_cid_matches = re.findall(r'ipfs://([a-zA-Z0-9]{46,})', html)
+    for cid in ipfs_cid_matches:
+        # Convert to cloudflare IPFS gateway (most reliable)
+        gateway_url = f"https://cloudflare-ipfs.com/ipfs/{cid}"
+        if gateway_url not in links:
+            links.append(gateway_url)
+            logger.info(f"Found IPFS CID, using gateway: {gateway_url}")
+    
+    # Also try to find direct gateway links
+    gateway_matches = re.findall(r'href="(https?://[^"]*(?:cloudflare-ipfs|ipfs\.io|dweb\.link)/ipfs/[^"]+)"', html, re.IGNORECASE)
+    for link in gateway_matches:
         if link not in links:
             links.append(link)
-            logger.info(f"Found IPFS link: {link}")
+            logger.info(f"Found IPFS gateway link: {link}")
     
     # Pattern 3: Direct CDN/file links
     cdn_matches = re.findall(r'href="(https?://[^"]*(?:cdn|download|get)[^"]*\.(pdf|epub|mobi|azw3))"', html, re.IGNORECASE)
@@ -325,6 +335,11 @@ def download_file(url: str, filename: str) -> bool:
         # Check content type
         content_type = response.headers.get('content-type', '')
         logger.info(f"Content-Type: {content_type}")
+        
+        # Reject HTML responses - they're error pages, not books
+        if 'text/html' in content_type:
+            logger.warning("Got HTML response instead of file, skipping")
+            return False
         
         # Determine file extension from content type or URL
         if 'epub' in content_type or '.epub' in url:
