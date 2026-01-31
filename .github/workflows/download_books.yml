@@ -28,12 +28,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
+      - name: Install OpenVPN
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+      
       - name: Create downloads directory
         run: mkdir -p downloads
+      
+      - name: Test connectivity and setup VPN if needed
+        run: |
+          python vpn_helper.py
+        continue-on-error: true
       
       - name: Run download script
         run: python download_books.py
         continue-on-error: true
+      
+      - name: Disconnect VPN
+        if: always()
+        run: |
+          sudo killall openvpn || true
       
       - name: List downloaded files
         run: |
