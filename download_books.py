@@ -62,52 +62,81 @@ def search_welib(query: str) -> dict:
             logger.error("Blocked by Cloudflare")
             return None
         
-        # WeLib uses different link patterns - look for book detail pages
-        # Pattern 1: /md5/HASH
-        md5_matches = re.findall(r'/md5/([a-fA-F0-9]{32})', response.text)
-        if md5_matches:
-            md5 = md5_matches[0].lower()
-            logger.info(f"Found MD5: {md5}")
-            return {'md5': md5, 'type': 'md5'}
+        html = response.text
         
-        # Pattern 2: Look for book links like /book/ID or href patterns
-        book_matches = re.findall(r'href="([^"]*(?:book|detail|download)[^"]*)"', response.text, re.IGNORECASE)
-        if book_matches:
-            link = book_matches[0]
-            if not link.startswith('http'):
-                link = f"https://welib.org{link}"
-            logger.info(f"Found book link: {link}")
-            return {'link': link, 'type': 'link'}
+        # WeLib book result patterns - analyze all links
+        all_links = re.findall(r'href="([^"]+)"', html)
         
-        # Pattern 3: Look for any result links in the page
-        # Check for links containing file extensions
-        file_links = re.findall(r'href="([^"]*\.(epub|pdf|mobi)[^"]*)"', response.text, re.IGNORECASE)
-        if file_links:
-            link = file_links[0][0]
-            if not link.startswith('http'):
-                link = f"https://welib.org{link}"
-            logger.info(f"Found direct file link: {link}")
-            return {'link': link, 'type': 'direct'}
+        logger.info(f"Total links found: {len(all_links)}")
         
-        # Pattern 4: Look for any result card links
-        # Search for common patterns in the page
-        all_links = re.findall(r'href="(/[^"]+)"', response.text)
-        for link in all_links:
-            # Skip obvious non-book links
-            if any(skip in link.lower() for skip in ['/css/', '/js/', '/search', '/login', '/account', '/donate', '/static']):
+        # Filter to unique links and log them
+        unique_links = list(set(all_links))
+        
+        # Separate links by type for debugging
+        book_links = []
+        for link in unique_links:
+            # Skip static/navigation links
+            if any(skip in link for skip in ['.css', '.js', '.png', '.jpg', '/donate', '/login', '/account', '/search?', 'javascript:', '#', '/manifest', 'favicon']):
                 continue
-            # Look for links that might be books
-            if any(keep in link.lower() for keep in ['md5', 'book', 'download', 'file', 'get']):
-                full_link = f"https://welib.org{link}"
-                logger.info(f"Found potential book link: {full_link}")
-                return {'link': full_link, 'type': 'potential'}
+            book_links.append(link)
         
-        logger.warning("No book links found in search results")
-        logger.info("Trying to find patterns in page...")
+        logger.info(f"Potential content links: {len(book_links)}")
+        for link in book_links[:30]:  # Log first 30
+            logger.info(f"  Link: {link}")
         
-        # Log some sample links for debugging
-        sample_links = all_links[:20]
-        logger.info(f"Sample links found: {sample_links}")
+        # Pattern 1: /md5/HASH - this is the standard pattern
+        md5_matches = re.findall(r'href="(/md5/[a-fA-F0-9]{32})"', html)
+        if md5_matches:
+            link = md5_matches[0]
+            logger.info(f"Found MD5 link: {link}")
+            return {'link': f"https://welib.org{link}", 'type': 'md5'}
+        
+        # Pattern 2: Check for /book/ID pattern
+        book_id_matches = re.findall(r'href="(/book/[^"]+)"', html)
+        if book_id_matches:
+            link = book_id_matches[0]
+            logger.info(f"Found book ID link: {link}")
+            return {'link': f"https://welib.org{link}", 'type': 'book'}
+        
+        # Pattern 3: Check for result cards - common patterns in book libraries
+        # Look for links that contain identifiers like ISBNs, fileIDs, etc
+        for link in book_links:
+            # Links with long alphanumeric IDs
+            if re.search(r'/[a-zA-Z]+/[a-zA-Z0-9]{8,}', link):
+                if not link.startswith('http'):
+                    link = f"https://welib.org{link}"
+                logger.info(f"Found ID-based link: {link}")
+                return {'link': link, 'type': 'id'}
+        
+        # Pattern 4: Links containing 'file', 'download', 'get'
+        for link in book_links:
+            if any(kw in link.lower() for kw in ['file', 'download', 'get', 'epub', 'pdf']):
+                if not link.startswith('http'):
+                    link = f"https://welib.org{link}"
+                logger.info(f"Found download-type link: {link}")
+                return {'link': link, 'type': 'download'}
+        
+        # Pattern 5: Look at links starting with specific paths
+        for link in book_links:
+            # Skip obvious site pages
+            if link in ['/', '/about', '/help', '/faq', '/contact']:
+                continue
+            # Any other path that might be a book
+            if link.startswith('/') and len(link) > 5:
+                # Has some ID-like component
+                if re.search(r'[0-9]', link) or len(link) > 20:
+                    full_link = f"https://welib.org{link}"
+                    logger.info(f"Found potential book path: {full_link}")
+                    return {'link': full_link, 'type': 'path'}
+        
+        logger.warning("Could not identify book links in search results")
+        logger.info("First 5000 chars of body for debugging:")
+        # Find body content
+        body_start = html.find('<main')
+        if body_start > 0:
+            logger.info(html[body_start:body_start+5000])
+        else:
+            logger.info(html[:5000])
         
         return None
         
