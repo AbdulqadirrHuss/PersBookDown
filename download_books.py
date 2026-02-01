@@ -481,55 +481,115 @@ def process_workflow(page, query: str) -> bool:
                     continue
             return None
 
-        # PRIORITIZE: Look for #bookIframe specifically as user requested
-        logger.info("Looking strictly for 'bookIframe'...")
+        # --- SEARCH STRATEGY START ---
         real_url = None
-        iframe = page.ele("#bookIframe", timeout=15)
         
-        if iframe:
-            logger.info("Found #bookIframe! Checking src and internal content...")
-            
-            # 1. Try to get URL from src first (as user pointed out it's in the 'url' param)
-            src = iframe.attr("src")
-            if src and "url=" in src:
-                logger.info(f"Scanning src: {src}")
-                try:
-                     # Parse the 'url' parameter from the src
-                     # src format: https://welib.org/fast_view?url=https%3A//...pdf
-                     if src.startswith("/"):
-                         src = "https://welib.org" + src
-                         
-                     parsed_src = urlparse(src)
-                     query_params = parse_qs(parsed_src.query)
-                     if 'url' in query_params:
-                         decoded_url = unquote(query_params['url'][0])
-                         logger.info(f"Decoded URL from src: {decoded_url}")
-                         if decoded_url.endswith(".pdf") or ".pdf" in decoded_url:
-                             real_url = decoded_url
-                except Exception as e:
-                    logger.error(f"Error parsing src URL: {e}")
+        # 1. BROAD SEARCH (User request): Look for ANY element with fast_view?url
+        logger.info("STRATEGY 1: Broad Search for 'fast_view?url'...")
+        
+        def check_element_for_download(ele):
+            candidates = [ele.attr("href"), ele.attr("src"), ele.attr("data-src")]
+            for val in candidates:
+                if val and "fast_view?url" in val:
+                    # Decode
+                    if val.startswith("/"): val = "https://welib.org" + val
+                    try:
+                        parsed = urlparse(val)
+                        qs = parse_qs(parsed.query)
+                        if 'url' in qs:
+                            decoded = unquote(qs['url'][0])
+                            if any(x in decoded.lower() for x in ['.pdf', '.epub', '.mobi']):
+                                return decoded
+                    except:
+                        pass
+            return None
 
-            # 2. FORCE SCAN inside this iframe (Fallback if src didn't work)
-            if not real_url:
-                try:
-                    # Search for link ending in .pdf directly
-                    pdf_link = iframe.ele("css:a[href$='.pdf']", timeout=5)
-                    if pdf_link:
-                        real_url = pdf_link.attr("href")
-                        logger.info(f"FOUND PDF LINK inside bookIframe: {real_url}")
-                        
-                    # If no link element, scan HTML text
-                    if not real_url:
-                        logger.info("No .pdf link element found, scanning HTML text...")
-                        html_content = iframe.html
-                        # Look for http...pdf
-                        match = re.search(r'https?://[^"\s<>]+\.pdf', html_content)
-                        if match:
-                            real_url = match.group(0)
-                            logger.info(f"FOUND PDF URL in HTML text: {real_url}")
-                            
-                except Exception as e:
-                    logger.error(f"Error scanning bookIframe: {e}")
+        potential_urls = []
+        for tag in ["a", "iframe", "embed", "object"]:
+             eles = page.eles(f"css:{tag}[href*='fast_view?url'], {tag}[src*='fast_view?url']")
+             for e in eles:
+                 res = check_element_for_download(e)
+                 if res: potential_urls.append(res)
+
+        if not potential_urls:
+            # Brute force scan
+            any_eles = page.eles("css:*[src*='fast_view?url'], *[href*='fast_view?url']")
+            for e in any_eles:
+                 res = check_element_for_download(e)
+                 if res: potential_urls.append(res)
+
+        if potential_urls:
+            real_url = potential_urls[0]
+            logger.info(f"MATCH (Broad Search): {real_url}")
+
+        # 2. STRICT #bookIframe SEARCH (Fallback)
+        if not real_url:
+            logger.info("STRATEGY 2: Strict #bookIframe Search...")
+            iframe = page.ele("#bookIframe", timeout=5)
+            if iframe:
+                # Check src
+                src = iframe.attr("src")
+                if src and "url=" in src:
+                     try:
+                         if src.startswith("/"): src = "https://welib.org" + src
+                         qs = parse_qs(urlparse(src).query)
+                         if 'url' in qs:
+                             decoded = unquote(qs['url'][0])
+                             if ".pdf" in decoded:
+                                 real_url = decoded
+                                 logger.info(f"MATCH (#bookIframe src): {real_url}")
+                     except: pass
+                
+                # Check inner content if src failed
+                if not real_url:
+                    try:
+                        pdf_link = iframe.ele("css:a[href$='.pdf']", timeout=2)
+                        if pdf_link:
+                            real_url = pdf_link.attr("href")
+                            logger.info(f"MATCH (#bookIframe inner link): {real_url}")
+                    except: pass
+
+        # 3. RECURSIVE IFRAME SEARCH (Deep Fallback)
+        if not real_url:
+            logger.info("STRATEGY 3: Recursive Iframe Search...")
+            iframe = find_iframe_recursive(page.eles("css:iframe"))
+            if iframe:
+                 # Check src
+                 src = iframe.attr("src")
+                 if src and "url=" in src:
+                     try:
+                         qs = parse_qs(urlparse(src).query)
+                         if 'url' in qs:
+                             real_url = unquote(qs['url'][0])
+                             logger.info(f"MATCH (Recursive src): {real_url}")
+                     except: pass
+        
+        # 4. LAST RESORT: PAGE TEXT SCAN
+        if not real_url:
+            logger.info("STRATEGY 4: Page Text Regex Scan...")
+            import re
+            match = re.search(r'https?://[^"\s<>]+\.pdf', page.html)
+            if match:
+                real_url = match.group(0)
+                logger.info(f"MATCH (Regex Scan): {real_url}")
+
+        # --- FINAL DOWNLOAD ---
+        if not real_url:
+            logger.error("ALL STRATEGIES FAILED. Could not find download URL.")
+            return False
+            
+        logger.info(f"FINAL URL: {real_url}")
+        
+        if not real_url.startswith("http"):
+            logger.error(f"Invalid URL format: {real_url}")
+            return False
+        
+        safe_title = clean_filename(query)
+        ext = ".pdf"
+        if ".epub" in real_url: ext = ".epub"
+        elif ".mobi" in real_url: ext = ".mobi"
+        
+        return download_file_curl(real_url, f"{safe_title}{ext}", page.url, page.cookies())
         
         # Fallback: Recursive search if bookIframe not found or revealed nothing
         if not real_url and not iframe:
