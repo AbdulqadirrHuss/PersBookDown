@@ -478,21 +478,54 @@ def process_workflow(page, query: str) -> bool:
                 f.write(page.html)
             return False
             
+        # Try to extract URL from src first
         src = iframe.attr("src")
-        if not src:
-            logger.error("Iframe has no src attribute")
-            return False
+        real_url = None
         
-        # Extract URL
-        full_src = urljoin("https://welib.org", src)
-        parsed = urlparse(full_src)
-        qs = parse_qs(parsed.query)
+        if src and ('url=' in src):
+            logger.info("Trying to decode URL from src...")
+            full_src = urljoin("https://welib.org", src)
+            parsed = urlparse(full_src)
+            qs = parse_qs(parsed.query)
+            real_url_encoded = qs.get('url', [None])[0]
+            if real_url_encoded:
+                real_url = unquote(real_url_encoded)
         
-        real_url = qs.get('url', [None])[0]
+        # If no URL from src, look INSIDE the iframe (bookIframe strategy)
         if not real_url:
+            logger.info("Scanning inside iframe for PDF link...")
+            try:
+                # Switch context to iframe detection
+                # Look for links ending in .pdf matches
+                # In DrissionPage, we can search inside the shadow root/iframe content
+                
+                # Check for "bookIframe" specifically users mentioned
+                book_iframe = page.ele("css:iframe#bookIframe", timeout=10)
+                target_frame = book_iframe if book_iframe else iframe
+                
+                # Search for PDF link inside the frame
+                pdf_link = target_frame.ele("css:a[href$='.pdf']", timeout=15)
+                
+                if pdf_link:
+                    real_url = pdf_link.attr("href")
+                    logger.info(f"Found PDF link inside iframe: {real_url}")
+                else:
+                    # Try regex search in frame html
+                    logger.info("No direct PDF link found, scanning frame HTML...")
+                    frame_html = target_frame.html
+                    # Look for http...pdf pattern
+                    import re
+                    match = re.search(r'https?://[^"\s]+\.pdf', frame_html)
+                    if match:
+                        real_url = match.group(0)
+                        logger.info(f"Found PDF URL in frame HTML: {real_url}")
+            except Exception as e:
+                logger.error(f"Error scanning inside iframe: {e}")
+
+        if not real_url:
+            logger.error("Could not find download URL in iframe src or content")
             return False
-        
-        real_url = unquote(real_url)
+            
         logger.info(f"Download URL: {real_url}")
         
         if not real_url.startswith("http"):
