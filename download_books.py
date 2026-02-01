@@ -488,6 +488,16 @@ def process_workflow(page, query: str) -> bool:
             
             if iframe:
                 logger.info("MATCH FOUND via recursive search!")
+                
+                # SPECIAL DEBUG: If src is about:blank, dump the frame HTML
+                src = iframe.attr("src")
+                if not src or src == "about:blank":
+                    logger.warning(f"Iframe src is '{src}'. Dumping frame HTML for inspection...")
+                    frame_html = iframe.html
+                    with open(f"debug_iframe_blank_attempt_{attempt+1}.html", "w", encoding="utf-8") as f:
+                        f.write(frame_html)
+                    logger.info(f"Dumped blank iframe HTML to debug_iframe_blank_attempt_{attempt+1}.html")
+                
                 break
                 
             random_delay(3, 5)
