@@ -421,21 +421,13 @@ def process_workflow(page, query: str) -> bool:
         if not wait_and_solve_cloudflare(page):
             return False
         
-        # Find iframe - Try multiple selectors and wait strategies
+        # Find iframe - Deep Search for ANY iframe with correct src
         logger.info("Waiting for viewer iframe...")
         page.get_screenshot(path="debug_before_iframe.png")
         
         iframe = None
-        iframe_selectors = [
-            "css:iframe#viewer_frame",
-            "css:iframe[src*='fast_view']",
-            "css:iframe[src*='web-premium']",
-            "css:iframe[src*='/read/']",
-            "css:iframe[name='viewer']",
-            "css:iframe",  # Any iframe as last resort
-        ]
         
-        # Try each selector with retries
+        # Try finding ANY iframe by iterating through all of them
         for attempt in range(3):
             logger.info(f"Iframe search attempt {attempt + 1}/3")
             
@@ -443,33 +435,37 @@ def process_workflow(page, query: str) -> bool:
             page.run_js("window.scrollTo(0, document.body.scrollHeight / 2)")
             random_delay(2, 3)
             
-            for selector in iframe_selectors:
+            # Get ALL iframes on the page
+            all_iframes = page.eles("css:iframe")
+            logger.info(f"Found {len(all_iframes)} total iframes on page")
+            
+            for fr in all_iframes:
                 try:
-                    iframe = page.ele(selector, timeout=10)
-                    if iframe:
-                        src = iframe.attr("src")
-                        if src and ('fast_view' in src or 'web-premium' in src or 'url=' in src):
-                            logger.info(f"Found iframe with selector: {selector}")
-                            logger.info(f"Iframe src: {src}")
-                            break
-                        else:
-                            iframe = None  # Not the right iframe
-                except:
-                    continue
+                    src = fr.attr("src")
+                    if not src:
+                        continue
+                        
+                    logger.info(f"Checking iframe src: {src[:50]}...")
+                    
+                    if 'fast_view' in src or 'web-premium' in src or 'url=' in src:
+                        logger.info(f"MATCH FOUND! Iframe src: {src}")
+                        iframe = fr
+                        break
+                except Exception as e:
+                    logger.warning(f"Error checking iframe: {e}")
             
             if iframe:
                 break
-            
+                
             random_delay(3, 5)
-        
+
         if not iframe:
-            logger.error("No viewer iframe found after all attempts")
+            logger.error("No viewer iframe found after deep search")
             page.get_screenshot(path="debug_no_iframe.png")
-            # Save HTML for debugging
             with open("debug_page.html", "w", encoding="utf-8") as f:
                 f.write(page.html)
             return False
-        
+            
         src = iframe.attr("src")
         if not src:
             logger.error("Iframe has no src attribute")
