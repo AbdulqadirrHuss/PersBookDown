@@ -31,6 +31,9 @@ def get_proxies():
     """Get proxy configuration from environment"""
     proxy_url = os.environ.get("PROXY_URL")
     if proxy_url:
+        # Chromium (Playwright) doesn't support socks5h://, replace with socks5://
+        if proxy_url.startswith("socks5h://"):
+            proxy_url = proxy_url.replace("socks5h://", "socks5://")
         return {"server": proxy_url}
     return None
 
