@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from urllib.parse import urljoin, unquote, quote
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright_stealth import stealth_sync
 from curl_cffi import requests
 
 # Setup logging
@@ -264,6 +265,10 @@ def main():
             
         context = browser.new_context(**context_args)
         page = context.new_page()
+        
+        # CRITICAL: Apply stealth BEFORE navigating
+        stealth_sync(page)
+        logger.info("Stealth applied to page.")
         
         for term in search_terms:
             try:
