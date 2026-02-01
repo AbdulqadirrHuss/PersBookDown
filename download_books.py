@@ -200,13 +200,17 @@ def search_libgen_direct(query: str) -> dict:
     """Search LibGen directly - Smart Endpoint Discovery"""
     
     encoded_query = query.replace(' ', '+')
-    # Try both search endpoints for maximum compatibility
-    endpoints = [
-        f"/search.php?req={encoded_query}",
-        f"/index.php?req={encoded_query}"
-    ]
-
+    
     for base_url in LIBGEN_MIRRORS:
+        # Determine endpoints based on domain
+        if "welib.org" in base_url:
+            endpoints = [f"/search?page=1&q={encoded_query}"]
+        else:
+            endpoints = [
+                f"/search.php?req={encoded_query}",
+                f"/index.php?req={encoded_query}"
+            ]
+            
         for endpoint in endpoints:
             search_url = f"{base_url}{endpoint}"
             logger.info(f"Searching: {search_url}")
