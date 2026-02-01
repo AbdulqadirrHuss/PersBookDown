@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Ebook Download via Proxy/Tor Routing
-Strategy: LibGen Direct Search (Tor)
+Strategy: Direct LibGen Search (Tor)
 Dependencies: curl_cffi (TLS Impersonation) + Tor (IP Masking)
 """
 
@@ -25,12 +25,12 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
 
-# LibGen Search Mirrors (Direct)
-LIBGEN_SEARCH_URLS = [
-    "https://libgen.is/search.php?req={query}",
-    "https://libgen.st/search.php?req={query}",
-    "https://libgen.rs/search.php?req={query}",
-    "https://libgen.li/search.php?req={query}",
+# LibGen Mirrors
+LIBGEN_MIRRORS = [
+    "https://libgen.is",
+    "https://libgen.st",
+    "https://libgen.rs",
+    "https://libgen.li",
 ]
 
 def get_proxies():
@@ -183,35 +183,30 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
         logger.error(f"Download error: {e}")
         return False
 
-def search_libgen(query: str) -> dict:
-    """Search LibGen directly"""
-    for url_template in LIBGEN_SEARCH_URLS:
-        url = url_template.format(query=query.replace(' ', '+'))
-        logger.info(f"Searching: {url}")
+def search_libgen_direct(query: str) -> dict:
+    """Search LibGen directly - bypasses Anna's Archive"""
+    for base_url in LIBGEN_MIRRORS:
+        search_url = f"{base_url}/search.php?req={query.replace(' ', '+')}"
+        logger.info(f"Searching: {search_url}")
         
-        html = get_page(url)
+        html = get_page(search_url)
         if not html:
             continue
         
-        # Save debug
-        with open('/tmp/libgen_search_debug.html', 'w', encoding='utf-8') as f:
-            f.write(html[:50000])
-
-        # Find MD5 in LibGen results table
-        # Matches Row -> MD5 Link -> Title Cell
-        md5_pattern = r'<tr[^>]*>.*?<td>.*?<a href="[^"]*md5=([a-fA-F0-9]{32})".*?</td>.*?<td[^>]*>(.*?)</td>'
-        matches = re.finditer(md5_pattern, html, re.DOTALL)
+        # Parse LibGen table for first result
+        # Pattern: mirror links contain MD5
+        md5_match = re.search(r'[?&]md5=([a-fA-F0-9]{32})', html)
+        title_match = re.search(r'<a[^>]+title="([^"]+)"', html)
         
-        for match in matches:
-            md5 = match.group(1)
-            # Clean title (remove html tags like <font> or <b>)
-            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+        if md5_match:
+            title = title_match.group(1) if title_match else query
             
-            # Simple keyword match
-            if any(term in title.lower() for term in query.lower().split() if len(term) > 2):
-                logger.info(f"Match found: '{title}' (MD5: {md5})")
-                return {"md5": md5, "title": title}
-                
+            # Simple header cleaning
+            title = re.sub(r'<[^>]+>', '', title).strip()
+            
+            logger.info(f"Match found: '{title}'")
+            return {"md5": md5_match.group(1), "title": title}
+            
     logger.warning("No results found on LibGen")
     return None
 
@@ -219,8 +214,8 @@ def process_search(query: str) -> bool:
     """Main processing logic"""
     logging.info(f"Processing: {query}")
     
-    # 1. Search LibGen
-    result = search_libgen(query)
+    # 1. Search LibGen Direct
+    result = search_libgen_direct(query)
     if not result:
         logger.error(f"No valid results found for: {query}")
         return False
@@ -252,6 +247,7 @@ def process_search(query: str) -> bool:
             r'<a[^>]+href="([^"]+)"[^>]*>\s*GET\s*</a>',
             r'<a[^>]+href="([^"]+)"[^>]*>.*?GET.*?</a>',
              r'href="(https?://[^"]+\.(?:pdf|epub|mobi))"',
+             r'href="(https?://[^"]*cloudflare[^"]+)"', 
         ]
         
         download_link = None
@@ -284,7 +280,7 @@ def main():
     
     for query in search_terms:
         process_search(query)
-        time.sleep(15) # Wait between searches (Increased delay)
+        time.sleep(15) 
 
 if __name__ == "__main__":
     main()
