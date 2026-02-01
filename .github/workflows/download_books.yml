@@ -42,16 +42,6 @@ jobs:
           echo "Search terms:"
           cat -n search_terms.txt
       
-      - name: Bypass Cloudflare
-        uses: xiaotianxt/bypass-cloudflare-for-github-action@v2.1.0
-        if: ${{ secrets.CF_ACCOUNT_ID != '' }}
-        with:
-          cf_account_id: ${{ secrets.CF_ACCOUNT_ID }}
-          cf_zone_id: ${{ secrets.CF_ZONE_ID }}
-          cf_api_token: ${{ secrets.CF_API_TOKEN }}
-          disable_bot_fight_mode: 'true'
-        continue-on-error: true
-      
       - name: Download books
         run: python download_books.py
         continue-on-error: true
