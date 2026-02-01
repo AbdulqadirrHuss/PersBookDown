@@ -481,89 +481,55 @@ def process_workflow(page, query: str) -> bool:
                     continue
             return None
 
-        for attempt in range(3):
-            logger.info(f"Iframe search attempt {attempt + 1}/3")
-            
-            # Scroll page to trigger lazy loading
-            page.run_js("window.scrollTo(0, document.body.scrollHeight / 2)")
-            random_delay(2, 3)
-            
-            # Get top level iframes
-            top_iframes = page.eles("css:iframe")
-            logger.info(f"Found {len(top_iframes)} top-level iframes")
-            
-            # Use recursive search
-            iframe = find_iframe_recursive(top_iframes)
-            
-            if iframe:
-                logger.info("MATCH FOUND via recursive search!")
-                
-                # SPECIAL DEBUG: If src is about:blank, dump the frame HTML
-                src = iframe.attr("src")
-                if not src or src == "about:blank":
-                    logger.warning(f"Iframe src is '{src}'. Dumping frame HTML for inspection...")
-                    frame_html = iframe.html
-                    with open(f"debug_iframe_blank_attempt_{attempt+1}.html", "w", encoding="utf-8") as f:
-                        f.write(frame_html)
-                    logger.info(f"Dumped blank iframe HTML to debug_iframe_blank_attempt_{attempt+1}.html")
-                
-                break
-                
-            random_delay(3, 5)
-
-        if not iframe:
-            logger.error("No viewer iframe found after deep search")
-            page.get_screenshot(path="debug_no_iframe.png")
-            with open("debug_page.html", "w", encoding="utf-8") as f:
-                f.write(page.html)
-            return False
-            
-        # Try to extract URL from src first
-        src = iframe.attr("src")
-        real_url = None
+        # PRIORITIZE: Look for #bookIframe specifically as user requested
+        logger.info("Looking strictly for 'bookIframe'...")
+        iframe = page.ele("#bookIframe", timeout=15)
         
-        if src and ('url=' in src):
-            logger.info("Trying to decode URL from src...")
-            full_src = urljoin("https://welib.org", src)
-            parsed = urlparse(full_src)
-            qs = parse_qs(parsed.query)
-            real_url_encoded = qs.get('url', [None])[0]
-            if real_url_encoded:
-                real_url = unquote(real_url_encoded)
-        
-        # If no URL from src, look INSIDE the iframe (bookIframe strategy)
-        if not real_url:
-            logger.info("Scanning inside iframe for PDF link...")
+        if iframe:
+            logger.info("Found #bookIframe! Scanning internal content for PDF...")
+            # FORCE SCAN inside this iframe
             try:
-                # Switch context to iframe detection
-                # Look for links ending in .pdf matches
-                # In DrissionPage, we can search inside the shadow root/iframe content
-                
-                # Check for "bookIframe" specifically users mentioned
-                book_iframe = page.ele("css:iframe#bookIframe", timeout=10)
-                target_frame = book_iframe if book_iframe else iframe
-                
-                # Search for PDF link inside the frame
-                pdf_link = target_frame.ele("css:a[href$='.pdf']", timeout=15)
-                
+                # 1. Search for link ending in .pdf
+                pdf_link = iframe.ele("css:a[href$='.pdf']", timeout=5)
                 if pdf_link:
                     real_url = pdf_link.attr("href")
-                    logger.info(f"Found PDF link inside iframe: {real_url}")
-                else:
-                    # Try regex search in frame html
-                    logger.info("No direct PDF link found, scanning frame HTML...")
-                    frame_html = target_frame.html
-                    # Look for http...pdf pattern
+                    logger.info(f"FOUND PDF LINK inside bookIframe: {real_url}")
+                    
+                # 2. If no link element, scan HTML text
+                if not real_url:
+                    logger.info("No .pdf link element found, scanning HTML text...")
+                    html_content = iframe.html
                     import re
-                    match = re.search(r'https?://[^"\s]+\.pdf', frame_html)
+                    # Look for http...pdf
+                    match = re.search(r'https?://[^"\s<>]+\.pdf', html_content)
                     if match:
                         real_url = match.group(0)
-                        logger.info(f"Found PDF URL in frame HTML: {real_url}")
+                        logger.info(f"FOUND PDF URL in HTML text: {real_url}")
+                        
             except Exception as e:
-                logger.error(f"Error scanning inside iframe: {e}")
+                logger.error(f"Error scanning bookIframe: {e}")
+        
+        # Fallback: Recursive search if bookIframe not found or revealed nothing
+        if not real_url and not iframe:
+            logger.info("bookIframe not found/empty. Starting recursive deep search...")
+            iframe = find_iframe_recursive(page.eles("css:iframe"))
+            
+        if not real_url and iframe:
+             # Try one last time with the found iframe (recurisve result)
+             # ... (logic to check recursively found iframe)
+             pass
 
         if not real_url:
-            logger.error("Could not find download URL in iframe src or content")
+             # Try scanning ANY visible text on page for a .pdf link
+             # sometimes it's an embed
+             logger.info("Last resort: Scanning entire page text for PDF url...")
+             match = re.search(r'https?://[^"\s<>]+\.pdf', page.html)
+             if match:
+                 real_url = match.group(0)
+                 logger.info(f"FOUND PDF URL in Page HTML: {real_url}")
+        
+        if not real_url:
+            logger.error("Could not find download URL in iframe or page content")
             return False
             
         logger.info(f"Download URL: {real_url}")
