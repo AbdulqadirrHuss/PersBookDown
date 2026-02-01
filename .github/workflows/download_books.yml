@@ -47,7 +47,7 @@ jobs:
       
       - name: Download books via LibGen (Tor)
         env:
-          PROXY_URL: "socks5h://tor:9050"
+          PROXY_URL: "socks5h://localhost:9050"
         run: python download_books.py
         continue-on-error: true
       
