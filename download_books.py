@@ -392,9 +392,18 @@ def process_workflow(page, query: str) -> bool:
         # Wait for results
         random_delay(2, 4)
         
-        # Click book - Refined selector based on user feedback (div.mb-4)
+        # Click book - Refined selector to avoid sidebar (div.mb-4 is used in filters too!)
         logger.info("Looking for book...")
-        book = page.ele("css:div.mb-4 a", timeout=60)
+        # Use 'main' to scope strictly to search results, avoiding sidebar/header
+        book = page.ele("css:main div.mb-4 a", timeout=60)
+        
+        if book:
+            # excessive safety check: ensure it's not a random link
+            href = book.attr("href")
+            if not href or href == "#":
+                logger.warning(f"Found book element but href is suspicious: {href}. Trying fallbacks...")
+                book = None
+        
         if not book:
              # Fallback
              book = page.ele("css:div.cursor-pointer, a[href*='/text/'], a[href*='/book/']", timeout=10)
