@@ -421,14 +421,58 @@ def process_workflow(page, query: str) -> bool:
         if not wait_and_solve_cloudflare(page):
             return False
         
-        # Find iframe
-        iframe = page.ele("css:iframe#viewer_frame, iframe[src*='fast_view'], iframe[src*='web-premium']", timeout=60)
+        # Find iframe - Try multiple selectors and wait strategies
+        logger.info("Waiting for viewer iframe...")
+        page.get_screenshot(path="debug_before_iframe.png")
+        
+        iframe = None
+        iframe_selectors = [
+            "css:iframe#viewer_frame",
+            "css:iframe[src*='fast_view']",
+            "css:iframe[src*='web-premium']",
+            "css:iframe[src*='/read/']",
+            "css:iframe[name='viewer']",
+            "css:iframe",  # Any iframe as last resort
+        ]
+        
+        # Try each selector with retries
+        for attempt in range(3):
+            logger.info(f"Iframe search attempt {attempt + 1}/3")
+            
+            # Scroll page to trigger lazy loading
+            page.run_js("window.scrollTo(0, document.body.scrollHeight / 2)")
+            random_delay(2, 3)
+            
+            for selector in iframe_selectors:
+                try:
+                    iframe = page.ele(selector, timeout=10)
+                    if iframe:
+                        src = iframe.attr("src")
+                        if src and ('fast_view' in src or 'web-premium' in src or 'url=' in src):
+                            logger.info(f"Found iframe with selector: {selector}")
+                            logger.info(f"Iframe src: {src}")
+                            break
+                        else:
+                            iframe = None  # Not the right iframe
+                except:
+                    continue
+            
+            if iframe:
+                break
+            
+            random_delay(3, 5)
+        
         if not iframe:
-            logger.error("No viewer iframe")
+            logger.error("No viewer iframe found after all attempts")
+            page.get_screenshot(path="debug_no_iframe.png")
+            # Save HTML for debugging
+            with open("debug_page.html", "w", encoding="utf-8") as f:
+                f.write(page.html)
             return False
         
         src = iframe.attr("src")
         if not src:
+            logger.error("Iframe has no src attribute")
             return False
         
         # Extract URL
