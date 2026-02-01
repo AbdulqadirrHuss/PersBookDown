@@ -312,16 +312,15 @@ def main():
     logger.info(f"Loaded {len(search_terms)} search terms.")
     
     # Setup ChromiumPage with anti-detection options
+    # NOTE: NOT using headless - Cloudflare detects it
+    # GitHub Actions will use Xvfb virtual display
     options = ChromiumOptions()
-    options.headless()
     options.set_argument('--no-sandbox')
     options.set_argument('--disable-gpu')
     options.set_argument('--disable-dev-shm-usage')
     options.set_argument('--disable-blink-features=AutomationControlled')
     options.set_argument(f'--user-agent={random.choice(USER_AGENTS)}')
-    
-    # Window size like real user
-    options.set_argument('--window-size=1920,1080')
+    options.set_argument('--start-maximized')
     
     logger.info("Launching Browser (DrissionPage/DevTools Protocol)...")
     page = ChromiumPage(options)

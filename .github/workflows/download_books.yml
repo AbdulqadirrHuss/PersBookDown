@@ -42,8 +42,11 @@ jobs:
           echo "Search terms:"
           cat -n search_terms.txt
       
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      
       - name: Download books
-        run: python download_books.py
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python download_books.py
         continue-on-error: true
       
       - name: Show debug info
