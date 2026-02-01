@@ -487,28 +487,49 @@ def process_workflow(page, query: str) -> bool:
         iframe = page.ele("#bookIframe", timeout=15)
         
         if iframe:
-            logger.info("Found #bookIframe! Scanning internal content for PDF...")
-            # FORCE SCAN inside this iframe
-            try:
-                # 1. Search for link ending in .pdf
-                pdf_link = iframe.ele("css:a[href$='.pdf']", timeout=5)
-                if pdf_link:
-                    real_url = pdf_link.attr("href")
-                    logger.info(f"FOUND PDF LINK inside bookIframe: {real_url}")
-                    
-                # 2. If no link element, scan HTML text
-                if not real_url:
-                    logger.info("No .pdf link element found, scanning HTML text...")
-                    html_content = iframe.html
-                    import re
-                    # Look for http...pdf
-                    match = re.search(r'https?://[^"\s<>]+\.pdf', html_content)
-                    if match:
-                        real_url = match.group(0)
-                        logger.info(f"FOUND PDF URL in HTML text: {real_url}")
+            logger.info("Found #bookIframe! Checking src and internal content...")
+            
+            # 1. Try to get URL from src first (as user pointed out it's in the 'url' param)
+            src = iframe.attr("src")
+            if src and "url=" in src:
+                logger.info(f"Scanning src: {src}")
+                try:
+                     # Parse the 'url' parameter from the src
+                     # src format: https://welib.org/fast_view?url=https%3A//...pdf
+                     if src.startswith("/"):
+                         src = "https://welib.org" + src
+                         
+                     parsed_src = urlparse(src)
+                     query_params = parse_qs(parsed_src.query)
+                     if 'url' in query_params:
+                         decoded_url = unquote(query_params['url'][0])
+                         logger.info(f"Decoded URL from src: {decoded_url}")
+                         if decoded_url.endswith(".pdf") or ".pdf" in decoded_url:
+                             real_url = decoded_url
+                except Exception as e:
+                    logger.error(f"Error parsing src URL: {e}")
+
+            # 2. FORCE SCAN inside this iframe (Fallback if src didn't work)
+            if not real_url:
+                try:
+                    # Search for link ending in .pdf directly
+                    pdf_link = iframe.ele("css:a[href$='.pdf']", timeout=5)
+                    if pdf_link:
+                        real_url = pdf_link.attr("href")
+                        logger.info(f"FOUND PDF LINK inside bookIframe: {real_url}")
                         
-            except Exception as e:
-                logger.error(f"Error scanning bookIframe: {e}")
+                    # If no link element, scan HTML text
+                    if not real_url:
+                        logger.info("No .pdf link element found, scanning HTML text...")
+                        html_content = iframe.html
+                        # Look for http...pdf
+                        match = re.search(r'https?://[^"\s<>]+\.pdf', html_content)
+                        if match:
+                            real_url = match.group(0)
+                            logger.info(f"FOUND PDF URL in HTML text: {real_url}")
+                            
+                except Exception as e:
+                    logger.error(f"Error scanning bookIframe: {e}")
         
         # Fallback: Recursive search if bookIframe not found or revealed nothing
         if not real_url and not iframe:
