@@ -138,7 +138,7 @@ def destroy_session():
     SESSION_ID = None
 
 
-def download_with_curl_cffi(url: str, filename: str) -> bool:
+def download_with_curl_cffi(url: str, filename: str, referer: str = None) -> bool:
     """
     Download file using curl_cffi with Chrome TLS fingerprint impersonation.
     This bypasses TLS fingerprint blocking that catches regular Python requests.
@@ -146,12 +146,25 @@ def download_with_curl_cffi(url: str, filename: str) -> bool:
     save_path = DOWNLOADS_DIR / filename
     
     logger.info(f"Downloading with Chrome impersonation: {url[:80]}...")
+    if referer:
+        logger.info(f"Using Referer: {referer}")
     
     try:
+        # Construct headers to mimic browser behavior and pass hotlink protection
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        
+        if referer:
+            headers["Referer"] = referer
+            
         # Use curl_cffi with Chrome 110 impersonation
         # This makes the TLS handshake look exactly like Chrome
         response = curl_requests.get(
             url,
+            headers=headers,
             impersonate="chrome110",
             timeout=120,
             allow_redirects=True
@@ -401,7 +414,8 @@ def process_search(query: str) -> bool:
         logger.info(f"Trying [{link_type}] source {i+1}/{len(download_links)}: {url[:60]}...")
         
         # Use curl_cffi for Chrome impersonation (bypasses TLS blocking)
-        if download_with_curl_cffi(url, filename):
+        # Pass the book page URL as Referer to bypass hotlink protection
+        if download_with_curl_cffi(url, filename, referer=search_result["url"]):
             logger.info(f"Successfully downloaded: {filename}")
             return True
         
