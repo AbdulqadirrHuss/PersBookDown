@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Ebook Download via Anna's Archive -> External Mirror (LibGen)
+Ebook Download via Anna's Archive -> Multi-Path Redundancy
 Uses curl_cffi for TLS fingerprint impersonation to bypass blocks on ALL steps.
-Strategy: Anna's Archive (Search) -> Constructed Mirror Link (MD5) -> File (Download)
-Now with MD5 Link Construction, IPFS Handling, and Strict Validation.
+Strategy:
+1. Construct Multiple LibGen Mirrors (Redundancy)
+2. Translate IPFS CIDs to HTTP Gateways (Bridge)
+3. Parse Landing Pages to find File (Traversal)
 """
 
 import os
@@ -34,6 +36,15 @@ ANNAS_ARCHIVE_DOMAINS = [
     "annas-archive.org",
     "annas-archive.li", 
     "annas-archive.se",
+]
+
+# Trusted IPFS Gateways (Public)
+IPFS_GATEWAYS = [
+    "https://ipfs.io/ipfs/",
+    "https://dweb.link/ipfs/",
+    "https://cloudflare-ipfs.com/ipfs/",
+    "https://gateway.pinata.cloud/ipfs/",
+    "https://ipfs.eth.aragon.network/ipfs/",
 ]
 
 # Session ID for reusing Cloudflare clearance (for search only)
@@ -161,7 +172,6 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
             return False
             
         # Dynamic Extension Detection
-        # 1. Try filename from Content-Disposition
         extension = ""
         filename_match = re.search(r'filename="?([^"]+)"?', content_disposition)
         if filename_match:
@@ -171,7 +181,6 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
                 extension = ext
                 logger.info(f"Detected extension from header: {extension}")
         
-        # 2. Try extension from Content-Type
         if not extension:
             if 'pdf' in content_type: extension = '.pdf'
             elif 'epub' in content_type: extension = '.epub'
@@ -179,13 +188,11 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
             elif 'zip' in content_type: extension = '.zip'
             elif 'djvu' in content_type: extension = '.djvu'
             
-        # 3. Fallback to URL extension
         if not extension:
             ext = os.path.splitext(url.split('?')[0])[1].lower()
             if ext in ['.pdf', '.epub', '.mobi', '.azw3']:
                 extension = ext
         
-        # Default if completely unknown
         if not extension:
             extension = '.pdf'
             logger.warning("Could not detect extension, defaulting to .pdf")
@@ -210,10 +217,13 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
         return False
 
 
-def resolve_mirror(mirror_url: str) -> str:
-    """Visit LibGen/IPFS mirror page and extract the real 'GET' link"""
-    logger.info(f"Resolving mirror: {mirror_url}")
-    html = get_page_with_curl(mirror_url)
+def resolve_landing_page(landing_url: str) -> str:
+    """
+    Visit Landing Page (LibGen/IPFS) and extract the real 'GET' link.
+    Handles Landing Page Traversal.
+    """
+    logger.info(f"Resolving landing page: {landing_url}")
+    html = get_page_with_curl(landing_url)
     if not html:
         return None
         
@@ -224,83 +234,69 @@ def resolve_mirror(mirror_url: str) -> str:
         r'<a[^>]+href="([^"]+)"[^>]*>.*?GET.*?</a>',
         r'<a[^>]+href="([^"]+)"[^>]*>\s*Cloudflare\s*</a>',
         r'<a[^>]+href="([^"]+)"[^>]*>\s*IPFS\.io\s*</a>',
+        # Catches raw IPFS links on landing pages
+        r'href="(https?://[^"]*/ipfs/[a-zA-Z0-9]+[^"]*)"',
     ]
     
     for pattern in patterns:
         matches = re.findall(pattern, html, re.IGNORECASE)
         for link in matches:
             if not link.startswith('http'):
-                link = urljoin(mirror_url, link)
+                link = urljoin(landing_url, link)
             
             logger.info(f"Found true download link: {link}")
             return link
             
-    logger.warning("No download link found on mirror page")
+    logger.warning("No download link found on landing page")
     return None
 
 
 def get_download_mirrors(book_url: str) -> list:
-    """Extract and prioritize download mirrors (Constructed > IPFS > Scraped)"""
+    """Generate redundant download mirrors"""
     logger.info(f"Checking {book_url} for mirrors...")
-    
     mirrors = []
+    md5 = None
     
-    # 1. MD5 Calculated Link (Highest Priority)
-    # Extract MD5 from URL: .../md5/{md5}
+    # 1. Extract MD5
     md5_match = re.search(r'/md5/([a-fA-F0-9]{32})', book_url)
     if md5_match:
         md5 = md5_match.group(1)
-        constructed_link = f"http://library.lol/main/{md5}"
-        mirrors.append({"url": constructed_link, "type": "constructed_libgen"})
-        logger.info(f"Constructed LibGen link: {constructed_link}")
+        # Construct Redundant LibGen Mirrors
+        libgen_mirrors = [
+            f"http://library.lol/main/{md5}",
+            f"https://libgen.li/ads.php?md5={md5}",
+            f"https://libgen.rs/book/index.php?md5={md5}",
+            f"https://libgen.is/book/index.php?md5={md5}",
+        ]
+        for url in libgen_mirrors:
+            mirrors.append({"url": url, "type": "libgen_landing"})
+            logger.info(f"Added LibGen mirror: {url}")
     
+    # Get HTML for scraping IPFS
     html = get_page_with_curl(book_url)
-    if not html:
-        return mirrors # Return at least constructed link if page fails
+    if html:
+        # Save debug
+        try:
+            with open('/tmp/annas_book_debug.html', 'w', encoding='utf-8') as f:
+                f.write(html)
+        except: pass
 
-    # Save debug HTML
-    try:
-        with open('/tmp/annas_book_debug.html', 'w', encoding='utf-8') as f:
-            f.write(html)
-    except:
-        pass
-        
-    # 2. IPFS Links (Medium Priority)
-    # Look for /ipfs_downloads/ or ipfs:// links
-    ipfs_patterns = [
-        r'href="([^"]*\/ipfs_downloads\/[^"]*)"',
-        r'href="(ipfs://[^"]+)"',
-    ]
-    
-    for pattern in ipfs_patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE)
-        for link in matches:
-            if link.startswith('/'):
-                # Handle relative URL: /ipfs_downloads/...
-                # Need to determine base domain from book_url
-                base_domain = "https://" + book_url.split('/')[2]
-                link = urljoin(base_domain, link)
-            
-            if link not in [m["url"] for m in mirrors]:
-                mirrors.append({"url": link, "type": "ipfs"})
-                logger.info(f"Found IPFS mirror: {link}")
+        # 2. IPFS Gateway Translation
+        # Find ipfs:// links and translate to HTTP gateways
+        ipfs_matches = re.findall(r'href="(ipfs://([a-zA-Z0-9]+))"', html)
+        if not ipfs_matches:
+             # Also try finding raw CIDs if they appear in text (rare) or other link formats
+             # Often Anna's links are redirects, but the text might show the CID?
+             # Let's rely on the explicit ipfs:// protocol which appeared in logs
+             pass
+             
+        for full_match, cid in ipfs_matches:
+            logger.info(f"Found IPFS CID: {cid}")
+            for gateway in IPFS_GATEWAYS:
+                gateway_url = f"{gateway}{cid}"
+                mirrors.append({"url": gateway_url, "type": "ipfs_gateway"})
+                logger.info(f"Added IPFS Gateway: {gateway_url}")
 
-    # 3. External Mirrors (Lowest Priority)
-    patterns = [
-        r'href="(https?://library\.lol/[^"]+)"',
-        r'href="(https?://libgen\.li/[^"]+)"',
-        r'href="(https?://libgen\.rs/[^"]+)"',
-        r'href="(https?://libgen\.is/[^"]+)"',
-        r'href="(https?://[^"]*z-library[^"]+)"',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE)
-        for link in matches:
-            if link not in [m["url"] for m in mirrors]:
-                mirrors.append({"url": link, "type": "scraped_external"})
-                logger.info(f"Found scraped mirror: {link}")
-                
     return mirrors
 
 
@@ -328,7 +324,6 @@ def search_annas_archive(query: str) -> dict:
                 raw_text = match.group(2)
                 text = re.sub(r'<[^>]+>', ' ', raw_text).strip()
                 text = re.sub(r'\s+', ' ', text)
-                
                 found_results.append({"url": f"https://{domain}{link}", "title": text})
 
             logger.info(f"Found {len(found_results)} potential results")
@@ -341,8 +336,6 @@ def search_annas_archive(query: str) -> dict:
                 if match_score >= required_matches:
                     logger.info(f"Match found: '{res['title']}'")
                     return {"url": res["url"], "title": res["title"]}
-                else:
-                    logger.debug(f"Skipping mismatch: '{res['title']}'")
             
             logger.warning("No results matched the search query strictly")
             
@@ -362,10 +355,10 @@ def process_search(query: str) -> bool:
     book_url = result["url"]
     base_filename = clean_filename(result["title"])
     
-    # 2. Get prioritized mirrors (Constructed > IPFS > Scraped)
+    # 2. Get prioritized mirrors
     mirrors = get_download_mirrors(book_url)
     if not mirrors:
-        logger.error("No mirrors found (and MD5 construction failed)")
+        logger.error("No mirrors found")
         return False
         
     # 3. Resolve and Download
@@ -374,14 +367,23 @@ def process_search(query: str) -> bool:
         mirror_type = mirror_info["type"]
         logger.info(f"Trying mirror {i+1}/{len(mirrors)} ({mirror_type}): {mirror_url}")
         
-        # Determine if we need to resolve it (LibGen/IPFS usually needs resolving)
-        # Or if it's a direct file link (rare)
-        download_link = resolve_mirror(mirror_url)
-        if not download_link:
-            continue
-            
+        # IPFS Gateways are direct-ish but might need resolving if they show a directory
+        # LibGen mirrors definitely need resolving (Landing Page)
+        
+        # Try resolving first (Traversal)
+        download_link = resolve_landing_page(mirror_url)
+        
+        # If traversal verified a link, use it. 
+        # If traversal failed but it was an IPFS gateway, maybe it IS the file? 
+        # (Usually IPFS gateways return the file directly if CID is a file)
+        # But if it's a directory, we need to pick the file.
+        # Let's assume resolve_landing_page handles detecting the file link if it's HTML.
+        # If it returns None, maybe the mirror_url ITSELF is the file?
+        
+        target_url = download_link if download_link else mirror_url
+        
         # Download (dynamic extension inside)
-        if download_file(download_link, base_filename, referer=mirror_url):
+        if download_file(target_url, base_filename, referer=mirror_url):
             logger.info(f"Successfully downloaded book for: {query}")
             return True
             
@@ -392,9 +394,8 @@ def process_search(query: str) -> bool:
 
 
 def main():
-    logger.info("Ebook Download - MD5 Construction + Prioritization")
+    logger.info("Ebook Download - Multi-Path Architecture")
     DOWNLOADS_DIR.mkdir(exist_ok=True)
-    
     create_session()
     
     if not SEARCH_TERMS_FILE.exists():
