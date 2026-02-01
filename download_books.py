@@ -12,6 +12,7 @@ import time
 import logging
 from pathlib import Path
 from urllib.parse import urljoin
+import random
 from curl_cffi import requests
 
 # Setup logging
@@ -251,7 +252,12 @@ def process_search(query: str) -> bool:
         f"https://libgen.rs/book/index.php?md5={md5}",
         f"https://libgen.is/book/index.php?md5={md5}",
         f"https://libgen.st/book/index.php?md5={md5}",
+        f"https://libgen.gs/ads.php?md5={md5}",
+        f"https://libgen.lc/ads.php?md5={md5}",
     ]
+    
+    # Randomize order to avoid getting stuck on a blocked mirror
+    random.shuffle(libgen_mirrors)
     
     # 3. Try Mirrors
     for mirror in libgen_mirrors:
