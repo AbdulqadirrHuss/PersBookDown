@@ -28,13 +28,13 @@ SEARCH_TERMS_FILE = Path("search_terms.txt")
 
 # LibGen Mirrors (Base URLs)
 LIBGEN_MIRRORS = [
+    "https://welib.org",
     "https://libgen.rs",
     "https://libgen.li",
     "https://libgen.is",
     "https://libgen.st",
     "https://libgen.gs",
     "https://libgen.lc",
-    "https://welib.org",
 ]
 
 def get_proxies():
