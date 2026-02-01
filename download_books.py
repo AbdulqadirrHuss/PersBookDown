@@ -196,20 +196,60 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
         logger.error(f"Download error: {e}")
         return False
 
+def search_welib(query: str) -> dict:
+    """Dedicated Strict Search for WeLib"""
+    encoded_query = query.replace(' ', '+')
+    search_url = f"https://welib.org/search?page=1&q={encoded_query}"
+    logger.info(f"Searching WeLib (Strict): {search_url}")
+    
+    html = get_page(search_url)
+    if not html:
+        logger.warning("WeLib returned no content")
+        return None
+        
+    # Aggressive MD5 Extraction for WeLib
+    # 1. Standard parameter: ?md5=...
+    # 2. Path segment: /book/md5 /md5
+    patterns = [
+        r'[?&]md5=([a-fA-F0-9]{32})',
+        r'/book/([a-fA-F0-9]{32})',
+        r'training/([a-fA-F0-9]{32})',
+        r'([a-fA-F0-9]{32})' # Fallback: any raw 32-char hex (risky but rigorous)
+    ]
+    
+    md5_match = None
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+             md5_match = match.group(1)
+             logger.info(f"WeLib MD5 found via pattern '{pattern}': {md5_match}")
+             break
+             
+    if md5_match:
+        # Try to extract title
+        title_match = re.search(r'<h[1-6][^>]*>(.*?)</h[1-6]>', html) # First header?
+        title = title_match.group(1) if title_match else query
+        title = re.sub(r'<[^>]+>', '', title).strip()
+        
+        return {"md5": md5_match, "title": title}
+    
+    logger.warning("No MD5 found in WeLib results")
+    return None
+
 def search_libgen_direct(query: str) -> dict:
-    """Search LibGen directly - Smart Endpoint Discovery"""
+    """Search Other LibGen Mirrors (Fallback)"""
     
     encoded_query = query.replace(' ', '+')
     
     for base_url in LIBGEN_MIRRORS:
-        # Determine endpoints based on domain
+        # Skip WeLib here as it is handled separately
         if "welib.org" in base_url:
-            endpoints = [f"/search?page=1&q={encoded_query}"]
-        else:
-            endpoints = [
-                f"/search.php?req={encoded_query}",
-                f"/index.php?req={encoded_query}"
-            ]
+            continue
+            
+        endpoints = [
+            f"/search.php?req={encoded_query}",
+            f"/index.php?req={encoded_query}"
+        ]
             
         for endpoint in endpoints:
             search_url = f"{base_url}{endpoint}"
@@ -241,8 +281,16 @@ def process_search(query: str) -> bool:
     """Main processing logic"""
     logging.info(f"Processing: {query}")
     
-    # 1. Search LibGen Direct
-    result = search_libgen_direct(query)
+    result = None
+    
+    # 1. STRICT WeLib Search
+    result = search_welib(query)
+    
+    # 2. Fallback to generic mirrors if WeLib failed
+    if not result:
+        logger.info("WeLib failed to find book. Falling back to generic mirrors...")
+        result = search_libgen_direct(query)
+        
     if not result:
         logger.error(f"No valid results found for: {query}")
         return False
