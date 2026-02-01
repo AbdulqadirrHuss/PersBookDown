@@ -488,39 +488,51 @@ def process_workflow(page, query: str) -> bool:
         logger.info("STRATEGY 1: Broad Search for 'fast_view?url'...")
         
         def check_element_for_download(ele):
-            candidates = [ele.attr("href"), ele.attr("src"), ele.attr("data-src")]
-            for val in candidates:
-                if val and "fast_view?url" in val:
-                    # Decode
-                    if val.startswith("/"): val = "https://welib.org" + val
-                    try:
-                        parsed = urlparse(val)
-                        qs = parse_qs(parsed.query)
-                        if 'url' in qs:
-                            decoded = unquote(qs['url'][0])
-                            if any(x in decoded.lower() for x in ['.pdf', '.epub', '.mobi']):
-                                return decoded
-                    except:
-                        pass
+            try:
+                candidates = [ele.attr("href"), ele.attr("src"), ele.attr("data-src")]
+                for val in candidates:
+                    if val and "fast_view?url" in val:
+                        # Decode
+                        if val.startswith("/"): val = "https://welib.org" + val
+                        try:
+                            parsed = urlparse(val)
+                            qs = parse_qs(parsed.query)
+                            if 'url' in qs:
+                                decoded = unquote(qs['url'][0])
+                                if any(x in decoded.lower() for x in ['.pdf', '.epub', '.mobi']):
+                                    return decoded
+                        except:
+                            pass
+            except:
+                pass
             return None
 
-        potential_urls = []
-        for tag in ["a", "iframe", "embed", "object"]:
-             eles = page.eles(f"css:{tag}[href*='fast_view?url'], {tag}[src*='fast_view?url']")
-             for e in eles:
-                 res = check_element_for_download(e)
-                 if res: potential_urls.append(res)
+        # RETRY LOOP: Wait for content to load (JS might populate it late)
+        for attempt in range(1, 4):
+            logger.info(f"Broad Search Attempt {attempt}/3...")
+            potential_urls = []
+            
+            # Scan specific tags
+            for tag in ["a", "iframe", "embed", "object"]:
+                 eles = page.eles(f"css:{tag}[href*='fast_view?url'], {tag}[src*='fast_view?url']")
+                 for e in eles:
+                     res = check_element_for_download(e)
+                     if res: potential_urls.append(res)
 
-        if not potential_urls:
-            # Brute force scan
-            any_eles = page.eles("css:*[src*='fast_view?url'], *[href*='fast_view?url']")
-            for e in any_eles:
-                 res = check_element_for_download(e)
-                 if res: potential_urls.append(res)
-
-        if potential_urls:
-            real_url = potential_urls[0]
-            logger.info(f"MATCH (Broad Search): {real_url}")
+            # Brute force if empty
+            if not potential_urls:
+                any_eles = page.eles("css:*[src*='fast_view?url'], *[href*='fast_view?url']")
+                for e in any_eles:
+                     res = check_element_for_download(e)
+                     if res: potential_urls.append(res)
+            
+            if potential_urls:
+                real_url = potential_urls[0]
+                logger.info(f"MATCH (Broad Search): {real_url}")
+                break
+                
+            logger.info("No match yet, waiting 5s...")
+            time.sleep(5)
 
         # 2. STRICT #bookIframe SEARCH (Fallback)
         if not real_url:
@@ -576,6 +588,11 @@ def process_workflow(page, query: str) -> bool:
         # --- FINAL DOWNLOAD ---
         if not real_url:
             logger.error("ALL STRATEGIES FAILED. Could not find download URL.")
+            # DUMP EVERYTHING FOR DEBUGGING THIS
+            page.get_screenshot(path="debug_failed_final.png")
+            with open("debug_failed_final.html", "w", encoding="utf-8") as f:
+                f.write(page.html)
+            logger.info("Dumped debug_failed_final.html and .png")
             return False
             
         logger.info(f"FINAL URL: {real_url}")
@@ -584,42 +601,6 @@ def process_workflow(page, query: str) -> bool:
             logger.error(f"Invalid URL format: {real_url}")
             return False
         
-        safe_title = clean_filename(query)
-        ext = ".pdf"
-        if ".epub" in real_url: ext = ".epub"
-        elif ".mobi" in real_url: ext = ".mobi"
-        
-        return download_file_curl(real_url, f"{safe_title}{ext}", page.url, page.cookies())
-        
-        # Fallback: Recursive search if bookIframe not found or revealed nothing
-        if not real_url and not iframe:
-            logger.info("bookIframe not found/empty. Starting recursive deep search...")
-            iframe = find_iframe_recursive(page.eles("css:iframe"))
-            
-        if not real_url and iframe:
-             # Try one last time with the found iframe (recurisve result)
-             # ... (logic to check recursively found iframe)
-             pass
-
-        if not real_url:
-             # Try scanning ANY visible text on page for a .pdf link
-             # sometimes it's an embed
-             logger.info("Last resort: Scanning entire page text for PDF url...")
-             match = re.search(r'https?://[^"\s<>]+\.pdf', page.html)
-             if match:
-                 real_url = match.group(0)
-                 logger.info(f"FOUND PDF URL in Page HTML: {real_url}")
-        
-        if not real_url:
-            logger.error("Could not find download URL in iframe or page content")
-            return False
-            
-        logger.info(f"Download URL: {real_url}")
-        
-        if not real_url.startswith("http"):
-            return False
-        
-        # Download
         safe_title = clean_filename(query)
         ext = ".pdf"
         if ".epub" in real_url: ext = ".epub"
