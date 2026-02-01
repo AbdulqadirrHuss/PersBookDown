@@ -27,9 +27,9 @@ SEARCH_TERMS_FILE = Path("search_terms.txt")
 
 # LibGen Mirrors
 LIBGEN_MIRRORS = [
+    "https://libgen.rs",
     "https://libgen.is",
     "https://libgen.st",
-    "https://libgen.rs",
     "https://libgen.li",
 ]
 
@@ -54,7 +54,7 @@ def check_tor_connection():
             "https://checkip.amazonaws.com",
             proxies=proxies,
             impersonate="chrome110",
-            timeout=30
+            timeout=(30, 120)
         )
         if response.status_code == 200:
             ip = response.text.strip()
@@ -86,7 +86,7 @@ def get_page(url: str, referer: str = None, retries: int = 3) -> str:
                 headers=headers,
                 proxies=proxies,
                 impersonate="chrome110",
-                timeout=60,
+                timeout=(30, 120),
                 allow_redirects=True
             )
             
