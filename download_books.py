@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Ebook Download via Proxy/Tor Routing
-Strategy: Brute Force Proxy Routing (Tor) with Retries & Verification
+Strategy: LibGen Direct Search (Tor)
 Dependencies: curl_cffi (TLS Impersonation) + Tor (IP Masking)
 """
 
@@ -25,11 +25,12 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
 
-# Anna's Archive domains (Prioritize active ones)
-ANNAS_ARCHIVE_DOMAINS = [
-    "annas-archive.li", 
-    "annas-archive.se",
-    "annas-archive.org",
+# LibGen Search Mirrors (Direct)
+LIBGEN_SEARCH_URLS = [
+    "https://libgen.is/search.php?req={query}",
+    "https://libgen.st/search.php?req={query}",
+    "https://libgen.rs/search.php?req={query}",
+    "https://libgen.li/search.php?req={query}",
 ]
 
 def get_proxies():
@@ -64,7 +65,8 @@ def check_tor_connection():
     except Exception as e:
         logger.error(f"Tor verification failed: {e}")
         logger.error("Is the Tor service running? Check port 9050.")
-        sys.exit(1) # Strict Fail
+        if os.environ.get("PROXY_URL"):
+             sys.exit(1) # Strict Fail only if proxy was expected
 
 def get_page(url: str, referer: str = None, retries: int = 3) -> str:
     """Get page content using curl_cffi with Proxy and Retries"""
@@ -92,7 +94,7 @@ def get_page(url: str, referer: str = None, retries: int = 3) -> str:
                 return response.text
             elif response.status_code in [404]:
                 logger.warning(f"Page not found: {url}")
-                return None # Don't retry 404
+                return None 
             
             logger.warning(f"Request failed: {url} [{response.status_code}]")
             
@@ -124,7 +126,7 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
             headers=headers,
             proxies=proxies,
             impersonate="chrome110",
-            timeout=300,  # Longer timeout for Tor
+            timeout=300, 
             allow_redirects=True
         )
         
@@ -154,7 +156,6 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
             elif 'mobi' in content_type: extension = '.mobi'
             elif 'zip' in content_type: extension = '.zip'
             
-        # Fallback to URL extension
         if not extension:
             ext = os.path.splitext(url.split('?')[0])[1].lower()
             if ext in ['.pdf', '.epub', '.mobi']:
@@ -182,60 +183,52 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
         logger.error(f"Download error: {e}")
         return False
 
-def search_annas_archive(query: str) -> dict:
-    """Search Anna's Archive via Proxy"""
-    query_terms = [t.lower() for t in query.split() if len(t) > 2] 
-    
-    for domain in ANNAS_ARCHIVE_DOMAINS:
-        encoded_query = query.replace(' ', '+')
-        url = f"https://{domain}/search?q={encoded_query}"
+def search_libgen(query: str) -> dict:
+    """Search LibGen directly"""
+    for url_template in LIBGEN_SEARCH_URLS:
+        url = url_template.format(query=query.replace(' ', '+'))
+        logger.info(f"Searching: {url}")
         
         html = get_page(url)
         if not html:
             continue
+        
+        # Save debug
+        with open('/tmp/libgen_search_debug.html', 'w', encoding='utf-8') as f:
+            f.write(html[:50000])
 
-        # Extract Results
-        matches = re.finditer(r'<a[^>]*href="(/md5/[a-fA-F0-9]{32})"[^>]*>(.*?)</a>', html, re.DOTALL | re.IGNORECASE)
+        # Find MD5 in LibGen results table
+        # Matches Row -> MD5 Link -> Title Cell
+        md5_pattern = r'<tr[^>]*>.*?<td>.*?<a href="[^"]*md5=([a-fA-F0-9]{32})".*?</td>.*?<td[^>]*>(.*?)</td>'
+        matches = re.finditer(md5_pattern, html, re.DOTALL)
         
         for match in matches:
-            link = match.group(1)
-            raw_text = match.group(2)
-            text = re.sub(r'<[^>]+>', ' ', raw_text).strip()
-            text = re.sub(r'\s+', ' ', text)
+            md5 = match.group(1)
+            # Clean title (remove html tags like <font> or <b>)
+            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
             
-            # Strict Validation
-            title_lower = text.lower()
-            match_score = sum(1 for term in query_terms if term in title_lower)
-            required_matches = max(1, len(query_terms) - 1)
-            
-            if match_score >= required_matches:
-                logger.info(f"Match found: '{text}'")
-                return {"url": f"https://{domain}{link}", "title": text}
+            # Simple keyword match
+            if any(term in title.lower() for term in query.lower().split() if len(term) > 2):
+                logger.info(f"Match found: '{title}' (MD5: {md5})")
+                return {"md5": md5, "title": title}
                 
+    logger.warning("No results found on LibGen")
     return None
 
 def process_search(query: str) -> bool:
     """Main processing logic"""
     logging.info(f"Processing: {query}")
     
-    # 1. Search
-    result = search_annas_archive(query)
+    # 1. Search LibGen
+    result = search_libgen(query)
     if not result:
         logger.error(f"No valid results found for: {query}")
         return False
         
-    book_url = result["url"]
+    md5 = result["md5"]
     base_filename = clean_filename(result["title"])
     
-    # 2. Extract MD5
-    md5_match = re.search(r'/md5/([a-fA-F0-9]{32})', book_url)
-    if not md5_match:
-        logger.error("Could not extract MD5 from URL")
-        return False
-        
-    md5 = md5_match.group(1)
-    
-    # 3. Construct LibGen Mirrors
+    # 2. Construct LibGen Mirrors
     libgen_mirrors = [
         f"http://library.lol/main/{md5}",
         f"https://libgen.li/ads.php?md5={md5}",
@@ -244,7 +237,7 @@ def process_search(query: str) -> bool:
         f"https://libgen.st/book/index.php?md5={md5}",
     ]
     
-    # 4. Try Mirrors
+    # 3. Try Mirrors
     for mirror in libgen_mirrors:
         logger.info(f"Trying mirror: {mirror}")
         
@@ -259,7 +252,6 @@ def process_search(query: str) -> bool:
             r'<a[^>]+href="([^"]+)"[^>]*>\s*GET\s*</a>',
             r'<a[^>]+href="([^"]+)"[^>]*>.*?GET.*?</a>',
              r'href="(https?://[^"]+\.(?:pdf|epub|mobi))"',
-             r'href="(https?://[^"]*cloudflare[^"]+)"', # often cloudflare backup links
         ]
         
         download_link = None
@@ -279,7 +271,7 @@ def process_search(query: str) -> bool:
     return False
 
 def main():
-    logger.info("Ebook Download - Proxy/Tor Architecture")
+    logger.info("Ebook Download - LibGen Direct + Tor")
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     
     # Verify Tor Connection
@@ -292,7 +284,7 @@ def main():
     
     for query in search_terms:
         process_search(query)
-        time.sleep(10) # Wait between searches
+        time.sleep(15) # Wait between searches (Increased delay)
 
 if __name__ == "__main__":
     main()
