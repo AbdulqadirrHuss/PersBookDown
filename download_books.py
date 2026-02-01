@@ -263,7 +263,7 @@ def search_annas_archive(query: str) -> dict:
 def get_slow_partner_links(book_url: str, domain: str) -> list:
     """
     Get "Slow Partner Server" download links from Anna's Archive book page.
-    These are direct HTTP downloads with minimal protection.
+    ONLY accepts links with /slow_download/ pattern - ignores everything else.
     """
     logger.info(f"Getting download links from: {book_url}")
     
@@ -280,57 +280,87 @@ def get_slow_partner_links(book_url: str, domain: str) -> list:
     
     logger.info(f"Book page: {len(html)} chars")
     
+    # BLACKLIST - Never download from these domains
+    JUNK_DOMAINS = [
+        'jdownloader.org',
+        'jdownloader.net', 
+        'github.com',
+        'twitter.com',
+        'reddit.com',
+        'telegram.org',
+        't.me/',
+        'discord.com',
+        'facebook.com',
+        'youtube.com',
+        'paypal.com',
+        'patreon.com',
+        'ko-fi.com',
+        'buymeacoffee.com',
+        'help.',
+        'faq.',
+        'about.',
+        'contact.',
+    ]
+    
     links = []
     
-    # Pattern 1: Slow Partner Server links (PRIMARY TARGET)
-    # These are the easiest to download - minimal protection
-    slow_patterns = [
-        r'href="(https?://[^"]*slow[^"]*)"',  # URLs containing 'slow'
-        r'Slow Partner.*?href="([^"]+)"',      # Text followed by link
-        r'href="([^"]+)"[^>]*>.*?Slow',        # Link followed by text
-        r'partner.*?href="(https?://[^"]+)"',  # Partner server links
-    ]
+    # STRICT PATTERN: Only accept links containing /slow_download/
+    # This is the ONLY reliable pattern for Anna's Archive download links
+    slow_download_pattern = r'href="([^"]*\/slow_download\/[^"]*)"'
     
-    for pattern in slow_patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
-        for match in matches:
-            if match.startswith('http') and 'slow' in match.lower():
-                if match not in [l["url"] for l in links]:
-                    links.append({"url": match, "type": "slow_partner"})
-                    logger.info(f"Found Slow Partner link: {match[:80]}")
+    matches = re.findall(slow_download_pattern, html, re.IGNORECASE)
     
-    # Pattern 2: Direct download links (any format)
-    direct_patterns = [
-        r'href="(https?://[^"]+\.(?:pdf|epub|mobi|azw3|djvu))"',
-        r'href="(https?://[^"]+/file/[^"]+)"',
-        r'href="(https?://[^"]+download[^"]*)"',
-    ]
+    for match in matches:
+        # Build full URL if relative
+        if match.startswith('/'):
+            url = f"https://{domain}{match}"
+        elif match.startswith('http'):
+            url = match
+        else:
+            continue
+        
+        # Check against blacklist
+        is_junk = False
+        for junk in JUNK_DOMAINS:
+            if junk.lower() in url.lower():
+                logger.warning(f"Rejecting junk URL: {url[:60]}")
+                is_junk = True
+                break
+        
+        if is_junk:
+            continue
+        
+        # Avoid duplicates
+        if url not in [l["url"] for l in links]:
+            links.append({"url": url, "type": "slow_download"})
+            logger.info(f"Found /slow_download/ link: {url[:80]}")
     
-    for pattern in direct_patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE)
-        for match in matches:
-            # Skip junk URLs
-            if any(skip in match.lower() for skip in ['javascript:', '#', 'ipfs.tech']):
+    # If no /slow_download/ links found, try looking for them with alternate patterns
+    if not links:
+        logger.warning("No /slow_download/ links found, trying alternate patterns...")
+        
+        # Look for links with "Slow Partner" text nearby
+        alt_pattern = r'Slow\s+Partner[^<]*<a[^>]+href="([^"]+)"'
+        alt_matches = re.findall(alt_pattern, html, re.IGNORECASE | re.DOTALL)
+        
+        for match in alt_matches:
+            if match.startswith('/'):
+                url = f"https://{domain}{match}"
+            elif match.startswith('http'):
+                url = match
+            else:
                 continue
-            if match not in [l["url"] for l in links]:
-                links.append({"url": match, "type": "direct"})
-                logger.info(f"Found direct link: {match[:80]}")
+            
+            # Check blacklist
+            is_junk = any(junk.lower() in url.lower() for junk in JUNK_DOMAINS)
+            if is_junk:
+                continue
+            
+            if url not in [l["url"] for l in links]:
+                links.append({"url": url, "type": "slow_partner_alt"})
+                logger.info(f"Found Slow Partner link (alt): {url[:80]}")
     
-    # Pattern 3: External mirrors (library.lol, libgen)
-    mirror_patterns = [
-        r'href="(https?://library\.lol/[^"]+)"',
-        r'href="(https?://libgen\.[^"]+)"',
-        r'href="(https?://[^"]*z-library[^"]+)"',
-    ]
-    
-    for pattern in mirror_patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE)
-        for match in matches:
-            if match not in [l["url"] for l in links]:
-                links.append({"url": match, "type": "mirror"})
-                logger.info(f"Found mirror link: {match[:80]}")
-    
-    logger.info(f"Total download links found: {len(links)}")
+    logger.info(f"Total valid download links: {len(links)}")
     return links
 
 
