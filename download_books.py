@@ -29,7 +29,6 @@ SEARCH_TERMS_FILE = Path("search_terms.txt")
 # LibGen Mirrors (Base URLs)
 LIBGEN_MIRRORS = [
     "https://welib.org",
-    "https://libgen.rs",
     "https://libgen.li",
     "https://libgen.is",
     "https://libgen.st",
@@ -197,85 +196,73 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
         return False
 
 def search_welib(query: str) -> dict:
-    """Dedicated Strict Search for WeLib"""
+    """Dedicated Strict Search for WeLib - Deep Scrape"""
     encoded_query = query.replace(' ', '+')
     search_url = f"https://welib.org/search?page=1&q={encoded_query}"
-    logger.info(f"Searching WeLib (Strict): {search_url}")
+    logger.info(f"Searching WeLib (Deep): {search_url}")
     
     html = get_page(search_url)
     if not html:
-        logger.warning("WeLib returned no content")
         return None
         
-    # Aggressive MD5 Extraction for WeLib
-    # 1. Standard parameter: ?md5=...
-    # 2. Path segment: /book/md5 /md5
-    patterns = [
-        r'[?&]md5=([a-fA-F0-9]{32})',
-        r'/book/([a-fA-F0-9]{32})',
-        r'training/([a-fA-F0-9]{32})',
-        r'([a-fA-F0-9]{32})' # Fallback: any raw 32-char hex (risky but rigorous)
+    # Step 1: Find Book Page Link
+    # Regex for book pages: href="/text/..." or href="/book/..."
+    book_page_match = re.search(r'href="(/text/[^"]+)"', html) or re.search(r'href="(/book/[^"]+)"', html)
+    
+    if not book_page_match:
+        logger.warning("No book page link found on WeLib search results")
+        return None
+        
+    book_page_path = book_page_match.group(1)
+    book_page_url = f"https://welib.org{book_page_path}"
+    logger.info(f"Found Book Page: {book_page_url}")
+    
+    # Step 2: Extract MD5 for fallback (optional but good)
+    md5 = None
+    md5_match = re.search(r'([a-fA-F0-9]{32})', book_page_path)
+    if md5_match:
+        md5 = md5_match.group(1)
+    
+    # Step 3: Visit Book Page to find Download Link
+    book_html = get_page(book_page_url, referer=search_url)
+    if not book_html:
+        return {"md5": md5} if md5 else None
+        
+    # Get Title
+    title_match = re.search(r'<h[1-6][^>]*>(.*?)</h[1-6]>', book_html)
+    title = title_match.group(1) if title_match else query
+    title = re.sub(r'<[^>]+>', '', title).strip()
+    
+    # Step 4: Find Direct Download Link
+    # Look for "Download" button or generic file links
+    # WeLib often has a main button
+    download_url = None
+    
+    # Priority 1: Explicit "Download" or "Get" buttons
+    link_patterns = [
+        r'href="([^"]+)"[^>]*>.*?Download.*?</a>',
+        r'href="([^"]+)"[^>]*>.*?Slow Partner Server.*?</a>', # Often the reliable one
+        r'href="([^"]+)"[^>]*class="[^"]*btn[^"]*"', # Generic buttons
     ]
     
-    md5_match = None
-    for pattern in patterns:
-        match = re.search(pattern, html)
+    for pattern in link_patterns:
+        match = re.search(pattern, book_html, re.IGNORECASE)
         if match:
-             md5_match = match.group(1)
-             logger.info(f"WeLib MD5 found via pattern '{pattern}': {md5_match}")
-             break
+             candidate = match.group(1)
+             if candidate.startswith('/'):
+                 download_url = f"https://welib.org{candidate}"
+             elif candidate.startswith('http'):
+                 download_url = candidate
              
-    if md5_match:
-        # Try to extract title
-        title_match = re.search(r'<h[1-6][^>]*>(.*?)</h[1-6]>', html) # First header?
-        title = title_match.group(1) if title_match else query
-        title = re.sub(r'<[^>]+>', '', title).strip()
-        
-        return {"md5": md5_match, "title": title}
+             if download_url:
+                 logger.info(f"Found Direct Download Link: {download_url}")
+                 break
     
-    logger.warning("No MD5 found in WeLib results")
-    return None
-
-def search_libgen_direct(query: str) -> dict:
-    """Search Other LibGen Mirrors (Fallback)"""
-    
-    encoded_query = query.replace(' ', '+')
-    
-    for base_url in LIBGEN_MIRRORS:
-        # Skip WeLib here as it is handled separately
-        if "welib.org" in base_url:
-            continue
-            
-        endpoints = [
-            f"/search.php?req={encoded_query}",
-            f"/index.php?req={encoded_query}"
-        ]
-            
-        for endpoint in endpoints:
-            search_url = f"{base_url}{endpoint}"
-            logger.info(f"Searching: {search_url}")
-            
-            html = get_page(search_url)
-            if not html:
-                continue
-            
-            # Parse LibGen table for first result
-            md5_match = re.search(r'[?&]md5=([a-fA-F0-9]{32})', html)
-            title_match = re.search(r'<a[^>]+title="([^"]+)"', html)
-            
-            if md5_match:
-                title = title_match.group(1) if title_match else query
-                title = re.sub(r'<[^>]+>', '', title).strip()
-                
-                logger.info(f"Match found: '{title}'")
-                return {"md5": md5_match.group(1), "title": title}
-            
-            # If we get HTML but no match, it might be a valid page with no results
-            # or the wrong endpoint type for this domain. 
-            # We continue to the next endpoint/mirror.
-
-    logger.warning("No results found on LibGen")
-    return None
+    return {
+        "md5": md5,
+        "title": title,
+        "direct_url": download_url
+    }
 
 def process_search(query: str) -> bool:
     """Main processing logic"""
@@ -286,23 +273,30 @@ def process_search(query: str) -> bool:
     # 1. STRICT WeLib Search
     result = search_welib(query)
     
-    # 2. Fallback to generic mirrors if WeLib failed
+    # 2. Try WeLib Direct Download
+    if result and result.get("direct_url"):
+        base_filename = clean_filename(result["title"])
+        logger.info(f"Attempting Direct WeLib Download: {result['direct_url']}")
+        if download_file(result["direct_url"], base_filename, referer="https://welib.org"):
+            return True
+        logger.warning("WeLib direct download failed. Trying mirrors...")
+    
+    # 3. Fallback to generic mirrors
     if not result:
         logger.info("WeLib failed to find book. Falling back to generic mirrors...")
         result = search_libgen_direct(query)
         
-    if not result:
+    if not result or not result.get("md5"):
         logger.error(f"No valid results found for: {query}")
         return False
         
     md5 = result["md5"]
-    base_filename = clean_filename(result["title"])
+    base_filename = clean_filename(result.get("title", query)) # Safe get
     
-    # 2. Construct LibGen Mirrors
+    # 4. Construct LibGen Mirrors (Excluding .rs)
     libgen_mirrors = [
         f"http://library.lol/main/{md5}",
         f"https://libgen.li/ads.php?md5={md5}",
-        f"https://libgen.rs/book/index.php?md5={md5}",
         f"https://libgen.is/book/index.php?md5={md5}",
         f"https://libgen.st/book/index.php?md5={md5}",
         f"https://libgen.gs/ads.php?md5={md5}",
