@@ -392,17 +392,22 @@ def process_workflow(page, query: str) -> bool:
         # Wait for results
         random_delay(2, 4)
         
-        book = page.ele("css:div.cursor-pointer, a[href*='/text/'], a[href*='/book/']", timeout=60)
+        # Click book - Refined selector based on user feedback (div.mb-4)
+        logger.info("Looking for book...")
+        book = page.ele("css:div.mb-4 a", timeout=60)
+        if not book:
+             # Fallback
+             book = page.ele("css:div.cursor-pointer, a[href*='/text/'], a[href*='/book/']", timeout=10)
+        
         if not book:
             logger.error("No results found")
             page.get_screenshot(path="debug_no_results.png")
             return False
-        
-        # Click book
+
         logger.info("Clicking book...")
         if not safe_click(page, book):
             return False
-        random_delay(2, 3)
+        random_delay(3, 5)
         
         if not wait_and_solve_cloudflare(page):
             return False
@@ -428,6 +433,10 @@ def process_workflow(page, query: str) -> bool:
         logger.info("Clicking Read...")
         if not safe_click(page, read):
             return False
+        
+        # INCREASED WAIT: Allow time for iframe to load/populate unique URL
+        logger.info("Waiting for iframe to load...")
+        time.sleep(10)  # Fixed wait for slow load
         random_delay(3, 5)
         
         if not wait_and_solve_cloudflare(page):
