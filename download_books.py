@@ -425,22 +425,25 @@ def process_workflow(page, query: str) -> bool:
             # Backup: search for any link containing 'Read' text
             read = page.ele("xpath://a[contains(text(), 'Read')]", timeout=5)
             
-        if not read:
-            logger.warning("No Read button")
-            page.get_screenshot(path="debug_no_read.png")
-            return False
-        
+        # Click Read and handle subsequent Cloudflare challenge
         logger.info("Clicking Read...")
+        
+        # Click and immediately check for new page load / challenge
         if not safe_click(page, read):
             return False
+            
+        logger.info("Clicked Read. Waiting for potential Cloudflare challenge...")
+        time.sleep(5) # Wait for challenge to trigger
         
-        # INCREASED WAIT: Allow time for iframe to load/populate unique URL
+        if is_cloudflare_page(page):
+            logger.info("New Cloudflare challenge detected! Solving...")
+            if not wait_and_solve_cloudflare(page):
+                return False
+        
+        # INCREASED WAIT: Allow time for iframe to load after challenge
         logger.info("Waiting for iframe to load...")
         time.sleep(10)  # Fixed wait for slow load
         random_delay(3, 5)
-        
-        if not wait_and_solve_cloudflare(page):
-            return False
         
         # Find iframe - Deep Search for ANY iframe with correct src
         logger.info("Waiting for viewer iframe...")
@@ -449,6 +452,26 @@ def process_workflow(page, query: str) -> bool:
         iframe = None
         
         # Try finding ANY iframe by iterating through all of them
+        # RECURSIVE SEARCH: Check iframes inside iframes too
+        def find_iframe_recursive(ele_list, depth=0):
+            if depth > 2: return None
+            for fr in ele_list:
+                try:
+                    src = fr.attr("src")
+                    if src:
+                        logger.info(f"Checking iframe (depth {depth}) src: {src[:50]}...")
+                        if 'fast_view' in src or 'web-premium' in src or 'url=' in src:
+                            return fr
+                    
+                    # Check inside this iframe
+                    inner_frames = fr.eles("css:iframe")
+                    if inner_frames:
+                        res = find_iframe_recursive(inner_frames, depth + 1)
+                        if res: return res
+                except:
+                    continue
+            return None
+
         for attempt in range(3):
             logger.info(f"Iframe search attempt {attempt + 1}/3")
             
@@ -456,26 +479,15 @@ def process_workflow(page, query: str) -> bool:
             page.run_js("window.scrollTo(0, document.body.scrollHeight / 2)")
             random_delay(2, 3)
             
-            # Get ALL iframes on the page
-            all_iframes = page.eles("css:iframe")
-            logger.info(f"Found {len(all_iframes)} total iframes on page")
+            # Get top level iframes
+            top_iframes = page.eles("css:iframe")
+            logger.info(f"Found {len(top_iframes)} top-level iframes")
             
-            for fr in all_iframes:
-                try:
-                    src = fr.attr("src")
-                    if not src:
-                        continue
-                        
-                    logger.info(f"Checking iframe src: {src[:50]}...")
-                    
-                    if 'fast_view' in src or 'web-premium' in src or 'url=' in src:
-                        logger.info(f"MATCH FOUND! Iframe src: {src}")
-                        iframe = fr
-                        break
-                except Exception as e:
-                    logger.warning(f"Error checking iframe: {e}")
+            # Use recursive search
+            iframe = find_iframe_recursive(top_iframes)
             
             if iframe:
+                logger.info("MATCH FOUND via recursive search!")
                 break
                 
             random_delay(3, 5)
