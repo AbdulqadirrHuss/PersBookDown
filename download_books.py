@@ -34,6 +34,7 @@ LIBGEN_MIRRORS = [
     "https://libgen.st",
     "https://libgen.gs",
     "https://libgen.lc",
+    "https://welib.org",
 ]
 
 def get_proxies():
