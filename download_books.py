@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Ebook Download via Proxy/Tor Routing
-Strategy: Direct LibGen Search (Tor)
+Strategy: Direct LibGen Search (Tor) with Endpoint Discovery
 Dependencies: curl_cffi (TLS Impersonation) + Tor (IP Masking)
 """
 
@@ -25,12 +25,14 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
 
-# LibGen Mirrors
+# LibGen Mirrors (Base URLs)
 LIBGEN_MIRRORS = [
-    "https://libgen.bz",
-    "https://libgen.la", 
-    "https://libgen.vg",
-    "https://libgen.gl",
+    "https://libgen.rs",
+    "https://libgen.li",
+    "https://libgen.is",
+    "https://libgen.st",
+    "https://libgen.gs",
+    "https://libgen.lc",
 ]
 
 def get_proxies():
@@ -193,29 +195,39 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
         return False
 
 def search_libgen_direct(query: str) -> dict:
-    """Search LibGen directly - bypasses Anna's Archive"""
+    """Search LibGen directly - Smart Endpoint Discovery"""
+    
+    encoded_query = query.replace(' ', '+')
+    # Try both search endpoints for maximum compatibility
+    endpoints = [
+        f"/search.php?req={encoded_query}",
+        f"/index.php?req={encoded_query}"
+    ]
+
     for base_url in LIBGEN_MIRRORS:
-        search_url = f"{base_url}/search.php?req={query.replace(' ', '+')}"
-        logger.info(f"Searching: {search_url}")
-        
-        html = get_page(search_url)
-        if not html:
-            continue
-        
-        # Parse LibGen table for first result
-        # Pattern: mirror links contain MD5
-        md5_match = re.search(r'[?&]md5=([a-fA-F0-9]{32})', html)
-        title_match = re.search(r'<a[^>]+title="([^"]+)"', html)
-        
-        if md5_match:
-            title = title_match.group(1) if title_match else query
+        for endpoint in endpoints:
+            search_url = f"{base_url}{endpoint}"
+            logger.info(f"Searching: {search_url}")
             
-            # Simple header cleaning
-            title = re.sub(r'<[^>]+>', '', title).strip()
+            html = get_page(search_url)
+            if not html:
+                continue
             
-            logger.info(f"Match found: '{title}'")
-            return {"md5": md5_match.group(1), "title": title}
+            # Parse LibGen table for first result
+            md5_match = re.search(r'[?&]md5=([a-fA-F0-9]{32})', html)
+            title_match = re.search(r'<a[^>]+title="([^"]+)"', html)
             
+            if md5_match:
+                title = title_match.group(1) if title_match else query
+                title = re.sub(r'<[^>]+>', '', title).strip()
+                
+                logger.info(f"Match found: '{title}'")
+                return {"md5": md5_match.group(1), "title": title}
+            
+            # If we get HTML but no match, it might be a valid page with no results
+            # or the wrong endpoint type for this domain. 
+            # We continue to the next endpoint/mirror.
+
     logger.warning("No results found on LibGen")
     return None
 
