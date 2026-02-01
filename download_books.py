@@ -3,6 +3,7 @@
 Ebook Download via Anna's Archive -> External Mirror (LibGen)
 Uses curl_cffi for TLS fingerprint impersonation to bypass blocks on ALL steps.
 Strategy: Anna's Archive (Search) -> LibGen Mirror (Page) -> File (Download)
+Now with Strict Title Validation and Dynamic Extension Detection.
 """
 
 import os
@@ -10,6 +11,7 @@ import re
 import sys
 import time
 import logging
+import mimetypes
 from pathlib import Path
 from curl_cffi import requests as curl_requests
 import requests # retained for FlareSolverr communication only
@@ -123,9 +125,12 @@ def get_page_with_curl(url: str, referer: str = None) -> str:
     return ""
 
 
-def download_file(url: str, filename: str, referer: str = None) -> bool:
-    """Download file using curl_cffi (Chrome impersonation)"""
-    save_path = DOWNLOADS_DIR / filename
+def clean_filename(name: str) -> str:
+    return re.sub(r'[^\w\s-]', '', name)[:50].strip().replace(' ', '_')
+
+
+def download_file(url: str, base_filename: str, referer: str = None) -> bool:
+    """Download file and dynamically determine extension from headers"""
     logger.info(f"Downloading: {url[:80]}...")
     
     try:
@@ -148,21 +153,50 @@ def download_file(url: str, filename: str, referer: str = None) -> bool:
             return False
             
         content_type = response.headers.get('content-type', '').lower()
+        content_disposition = response.headers.get('content-disposition', '')
+        
         if 'text/html' in content_type:
             logger.error("Got HTML instead of file (likely timer page or error)")
             return False
             
-        # Determine extension
-        if 'epub' in content_type or '.epub' in url.lower():
-            save_path = DOWNLOADS_DIR / filename.replace('.pdf', '.epub')
-        elif '.mobi' in url.lower():
-            save_path = DOWNLOADS_DIR / filename.replace('.pdf', '.mobi')
+        # Dynamic Extension Detection
+        # 1. Try filename from Content-Disposition
+        extension = ""
+        filename_match = re.search(r'filename="?([^"]+)"?', content_disposition)
+        if filename_match:
+            original_name = filename_match.group(1)
+            ext = os.path.splitext(original_name)[1].lower()
+            if ext in ['.pdf', '.epub', '.mobi', '.azw3', '.djvu', '.zip', '.rar']:
+                extension = ext
+                logger.info(f"Detected extension from header: {extension}")
+        
+        # 2. Try extension from Content-Type
+        if not extension:
+            if 'pdf' in content_type: extension = '.pdf'
+            elif 'epub' in content_type: extension = '.epub'
+            elif 'mobi' in content_type: extension = '.mobi'
+            elif 'zip' in content_type: extension = '.zip'
+            elif 'djvu' in content_type: extension = '.djvu'
+            
+        # 3. Fallback to URL extension
+        if not extension:
+            ext = os.path.splitext(url.split('?')[0])[1].lower()
+            if ext in ['.pdf', '.epub', '.mobi', '.azw3']:
+                extension = ext
+        
+        # Default if completely unknown
+        if not extension:
+            extension = '.pdf'
+            logger.warning("Could not detect extension, defaulting to .pdf")
+            
+        final_filename = f"{base_filename}{extension}"
+        save_path = DOWNLOADS_DIR / final_filename
             
         with open(save_path, 'wb') as f:
             f.write(response.content)
             
         size = save_path.stat().st_size
-        logger.info(f"Downloaded {size:,} bytes")
+        logger.info(f"Downloaded {size:,} bytes to {final_filename}")
         
         if size < 10000:
             logger.warning("File too small, deleting")
@@ -176,17 +210,12 @@ def download_file(url: str, filename: str, referer: str = None) -> bool:
 
 
 def resolve_libgen_mirror(mirror_url: str) -> str:
-    """
-    Visit LibGen/Library.lol mirror page and extract the real 'GET' link
-    Using curl_cffi logic to bypass TLS blocks on the mirror page itself
-    """
+    """Visit LibGen/Library.lol mirror page and extract the real 'GET' link"""
     logger.info(f"Resolving mirror: {mirror_url}")
     html = get_page_with_curl(mirror_url)
     if not html:
         return None
         
-    # Pattern matching for "GET", "Cloudflare", or "IPFS.io" links
-    # These are usually the direct download buttons
     patterns = [
         r'href="(https?://[^"]+/get\.php\?[^"]+)"',
         r'href="(https?://[^"]+\.(?:pdf|epub|mobi|azw3))"',
@@ -199,7 +228,6 @@ def resolve_libgen_mirror(mirror_url: str) -> str:
         matches = re.findall(pattern, html, re.IGNORECASE)
         for link in matches:
             if not link.startswith('http'):
-                # Handle relative URLs often found on mirrors
                 from urllib.parse import urljoin
                 link = urljoin(mirror_url, link)
             
@@ -214,7 +242,6 @@ def get_external_mirrors(book_url: str) -> list:
     """Extract external mirror links (LibGen, etc) from Anna's book page"""
     logger.info(f"Checking {book_url} for external mirrors...")
     
-    # We can use FlareSolverr OR curl_cffi here. Using curl_cffi for consistency
     html = get_page_with_curl(book_url)
     if not html:
         return []
@@ -229,16 +256,12 @@ def get_external_mirrors(book_url: str) -> list:
         
     mirrors = []
     
-    # Targeting "External Downloads" section
-    # library.lol, libgen.li, libgen.rs
-    # Loosened regex to capture more variations
     patterns = [
         r'href="(https?://library\.lol/[^"]+)"',
         r'href="(https?://libgen\.li/[^"]+)"',
         r'href="(https?://libgen\.rs/[^"]+)"',
         r'href="(https?://libgen\.is/[^"]+)"',
         r'href="(https?://[^"]*z-library[^"]+)"',
-        # Catches any link text that looks like a known mirror
         r'<a[^>]+href="([^"]+)"[^>]*>.*?LibGen.*?</a>',
         r'<a[^>]+href="([^"]+)"[^>]*>.*?Library.*?</a>',
     ]
@@ -254,7 +277,9 @@ def get_external_mirrors(book_url: str) -> list:
 
 
 def search_annas_archive(query: str) -> dict:
-    """Search Anna's Archive"""
+    """Search Anna's Archive with Strict Title Validation"""
+    query_terms = [t.lower() for t in query.split() if len(t) > 2] # ignore small words
+    
     for domain in ANNAS_ARCHIVE_DOMAINS:
         encoded_query = query.replace(' ', '+')
         url = f"https://{domain}/search?q={encoded_query}"
@@ -263,12 +288,47 @@ def search_annas_archive(query: str) -> dict:
         result = flaresolverr_request(url)
         if result and result.get("html"):
             html = result["html"]
-            # Look for MD5 link
-            md5_matches = re.findall(r'href="(/md5/[a-fA-F0-9]{32})"', html)
-            if md5_matches:
-                book_url = f"https://{domain}{md5_matches[0]}"
-                logger.info(f"Found book page: {book_url}")
-                return {"url": book_url}
+            
+            # Save search HTML for debugging
+            with open('/tmp/annas_search_debug.html', 'w', encoding='utf-8') as f:
+                f.write(html[:50000])
+
+            # Extract ALL search results
+            # Typical structure: <a href="/md5/..." ...>Title...</a>
+            # We capture the link and some surrounding text
+            # This regex is broad to catch different layouts
+            matches = re.finditer(r'<a[^>]*href="(/md5/[a-fA-F0-9]{32})"[^>]*>(.*?)</a>', html, re.DOTALL | re.IGNORECASE)
+            
+            found_results = []
+            for match in matches:
+                link = match.group(1)
+                raw_text = match.group(2)
+                # Clean text: remove HTML tags
+                text = re.sub(r'<[^>]+>', ' ', raw_text).strip()
+                # Remove extra spaces
+                text = re.sub(r'\s+', ' ', text)
+                
+                found_results.append({"url": f"https://{domain}{link}", "title": text})
+
+            logger.info(f"Found {len(found_results)} potential results")
+            
+            # Title Validation
+            for res in found_results:
+                title_lower = res["title"].lower()
+                # Check if ALL significant query terms are in the title
+                match_score = sum(1 for term in query_terms if term in title_lower)
+                
+                # If we match most terms (e.g. 2 out of 3), it's a good candidate
+                required_matches = max(1, len(query_terms) - 1) 
+                
+                if match_score >= required_matches:
+                    logger.info(f"Match found: '{res['title']}' (Score: {match_score}/{len(query_terms)})")
+                    return {"url": res["url"], "title": res["title"]}
+                else:
+                    logger.debug(f"Skipping mismatch: '{res['title']}'")
+            
+            logger.warning("No results matched the search query strictly")
+            
     return None
 
 
@@ -276,34 +336,34 @@ def process_search(query: str) -> bool:
     """Main processing logic"""
     logging.info(f"Processing: {query}")
     
-    # 1. Search
+    # 1. Search with strict validation
     result = search_annas_archive(query)
     if not result:
-        logger.error("No results found")
+        logger.error(f"No valid results found for: {query}")
         return False
         
     book_url = result["url"]
-    safe_name = re.sub(r'[^\w\s-]', '', query)[:50].strip().replace(' ', '_')
-    filename = f"{safe_name}.pdf"
+    base_filename = clean_filename(result["title"])
     
-    # 2. Get External Mirrors (Prioritize these over slow partners)
+    # 2. Get External Mirrors
     mirrors = get_external_mirrors(book_url)
     if not mirrors:
         logger.error("No external mirrors found")
+        # Try finding ANY link if mirrors specific failed? 
+        # For now, rely on regex improvements
         return False
         
-    # 3. Resolve and Download from Mirrors
+    # 3. Resolve and Download
     for i, mirror in enumerate(mirrors):
         logger.info(f"Trying mirror {i+1}/{len(mirrors)}: {mirror}")
         
-        # Resolve the actual download link from the mirror page
         download_link = resolve_libgen_mirror(mirror)
         if not download_link:
             continue
             
-        # Download the file
-        if download_file(download_link, filename, referer=mirror):
-            logger.info(f"Successfully downloaded: {filename}")
+        # Download (dynamic extension inside)
+        if download_file(download_link, base_filename, referer=mirror):
+            logger.info(f"Successfully downloaded book for: {query}")
             return True
             
         time.sleep(2)
@@ -313,7 +373,7 @@ def process_search(query: str) -> bool:
 
 
 def main():
-    logger.info("Ebook Download - External Mirrors + curl_cffi")
+    logger.info("Ebook Download - External Mirrors + Strict Validation")
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     
     create_session()
