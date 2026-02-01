@@ -483,6 +483,7 @@ def process_workflow(page, query: str) -> bool:
 
         # PRIORITIZE: Look for #bookIframe specifically as user requested
         logger.info("Looking strictly for 'bookIframe'...")
+        real_url = None
         iframe = page.ele("#bookIframe", timeout=15)
         
         if iframe:
