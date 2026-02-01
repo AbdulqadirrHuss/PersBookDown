@@ -293,6 +293,35 @@ def wait_and_solve_cloudflare(page, max_wait=120) -> bool:
 def random_delay(min_sec=1.0, max_sec=3.0):
     time.sleep(random.uniform(min_sec, max_sec))
 
+def safe_click(page, element):
+    """Click element with fallbacks for elements without location/size"""
+    try:
+        # Try normal click first
+        element.click()
+        return True
+    except Exception as e:
+        if "no location or size" in str(e):
+            logger.info("Element has no location, trying JS click...")
+            try:
+                # JavaScript click fallback
+                page.run_js("arguments[0].click()", element)
+                return True
+            except Exception as e2:
+                logger.warning(f"JS click failed: {e2}")
+                # Try clicking via href if it's a link
+                try:
+                    href = element.attr("href")
+                    if href:
+                        logger.info(f"Navigating directly to: {href}")
+                        if href.startswith("/"):
+                            href = f"https://welib.org{href}"
+                        page.get(href)
+                        return True
+                except:
+                    pass
+        logger.error(f"Click failed: {e}")
+        return False
+
 def clean_filename(name: str) -> str:
     return re.sub(r'[^\w\s-]', '', name)[:50].strip().replace(' ', '_')
 
@@ -371,7 +400,8 @@ def process_workflow(page, query: str) -> bool:
         
         # Click book
         logger.info("Clicking book...")
-        book.click()
+        if not safe_click(page, book):
+            return False
         random_delay(2, 3)
         
         if not wait_and_solve_cloudflare(page):
@@ -384,7 +414,8 @@ def process_workflow(page, query: str) -> bool:
             return False
         
         logger.info("Clicking Read...")
-        read.click()
+        if not safe_click(page, read):
+            return False
         random_delay(3, 5)
         
         if not wait_and_solve_cloudflare(page):
