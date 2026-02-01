@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Ebook Download via Proxy/Tor Routing
-Strategy: Brute Force Proxy Routing (Tor)
+Strategy: Brute Force Proxy Routing (Tor) with Retries & Verification
 Dependencies: curl_cffi (TLS Impersonation) + Tor (IP Masking)
 """
 
@@ -25,53 +25,84 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
 
-# Anna's Archive domains
+# Anna's Archive domains (Prioritize active ones)
 ANNAS_ARCHIVE_DOMAINS = [
-    "annas-archive.org",
     "annas-archive.li", 
     "annas-archive.se",
+    "annas-archive.org",
 ]
 
 def get_proxies():
     """Get proxy configuration from environment"""
     proxy_url = os.environ.get("PROXY_URL")
     if proxy_url:
-        logger.info(f"Using Proxy: {proxy_url}")
         return {"http": proxy_url, "https": proxy_url}
-    
-    logger.warning("No PROXY_URL set! Direct connection will check IP reputation.")
     return None
 
-def get_page(url: str, referer: str = None) -> str:
-    """Get page content using curl_cffi with Proxy"""
+def check_tor_connection():
+    """Verify that we are routed through Tor"""
+    logger.info("Verifying Tor connection...")
     proxies = get_proxies()
-    
+    if not proxies:
+        logger.warning("No PROXY_URL set. Verification skipped (Direct Connection).")
+        return
+
     try:
-        headers = {
-             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
-        }
-        if referer:
-            headers["Referer"] = referer
-            
-        logger.info(f"Fetching: {url}")
+        # Check IP
         response = requests.get(
-            url,
-            headers=headers,
+            "https://checkip.amazonaws.com",
             proxies=proxies,
             impersonate="chrome110",
-            timeout=60,
-            allow_redirects=True
+            timeout=30
         )
-        
         if response.status_code == 200:
-            return response.text
-        
-        logger.error(f"Request failed: {url} [{response.status_code}]")
-        return None
-        
+            ip = response.text.strip()
+            logger.info(f"Tor Connection Confirmed. Masked IP: {ip}")
+            return True
+        else:
+            logger.error(f"Tor verification failed with status: {response.status_code}")
     except Exception as e:
-        logger.error(f"Network error on {url}: {e}")
-        return None
+        logger.error(f"Tor verification failed: {e}")
+        logger.error("Is the Tor service running? Check port 9050.")
+        sys.exit(1) # Strict Fail
+
+def get_page(url: str, referer: str = None, retries: int = 3) -> str:
+    """Get page content using curl_cffi with Proxy and Retries"""
+    proxies = get_proxies()
+    
+    for attempt in range(retries):
+        try:
+            headers = {
+                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+            }
+            if referer:
+                headers["Referer"] = referer
+            
+            logger.info(f"Fetching: {url} (Attempt {attempt+1}/{retries})")
+            response = requests.get(
+                url,
+                headers=headers,
+                proxies=proxies,
+                impersonate="chrome110",
+                timeout=60,
+                allow_redirects=True
+            )
+            
+            if response.status_code == 200:
+                return response.text
+            elif response.status_code in [404]:
+                logger.warning(f"Page not found: {url}")
+                return None # Don't retry 404
+            
+            logger.warning(f"Request failed: {url} [{response.status_code}]")
+            
+        except Exception as e:
+            logger.warning(f"Network error on {url}: {e}")
+            
+        time.sleep(2 * (attempt + 1)) # Backoff
+        
+    logger.error(f"Failed to get {url} after {retries} attempts")
+    return None
 
 def clean_filename(name: str) -> str:
     return re.sub(r'[^\w\s-]', '', name)[:50].strip().replace(' ', '_')
@@ -209,6 +240,8 @@ def process_search(query: str) -> bool:
         f"http://library.lol/main/{md5}",
         f"https://libgen.li/ads.php?md5={md5}",
         f"https://libgen.rs/book/index.php?md5={md5}",
+        f"https://libgen.is/book/index.php?md5={md5}",
+        f"https://libgen.st/book/index.php?md5={md5}",
     ]
     
     # 4. Try Mirrors
@@ -221,12 +254,12 @@ def process_search(query: str) -> bool:
             continue
             
         # Parse for GET link
-        # "GET" link, or "Cloudflare", or direct .pdf/.epub link
         patterns = [
             r'href="(https?://[^"]+/get\.php\?[^"]+)"',
             r'<a[^>]+href="([^"]+)"[^>]*>\s*GET\s*</a>',
             r'<a[^>]+href="([^"]+)"[^>]*>.*?GET.*?</a>',
              r'href="(https?://[^"]+\.(?:pdf|epub|mobi))"',
+             r'href="(https?://[^"]*cloudflare[^"]+)"', # often cloudflare backup links
         ]
         
         download_link = None
@@ -249,9 +282,8 @@ def main():
     logger.info("Ebook Download - Proxy/Tor Architecture")
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     
-    # Verify Proxy is set
-    if not os.environ.get("PROXY_URL"):
-        logger.warning("WARNING: PROXY_URL is not set. Running in Direct Mode (Risky).")
+    # Verify Tor Connection
+    check_tor_connection()
     
     if not SEARCH_TERMS_FILE.exists():
         sys.exit(1)

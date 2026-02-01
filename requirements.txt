@@ -1,2 +1,2 @@
-# Cloudflare bypass
-cloudscraper>=1.2.71
+curl_cffi>=0.5.9
+beautifulsoup4>=4.12.0
