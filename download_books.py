@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Ebook Download via WeLib - Cloudflare Bypass Edition
-Uses DrissionPage (DevTools Protocol) with comprehensive anti-detection techniques.
+Ebook Download via WeLib - Cloudflare Solver Edition
+Uses DrissionPage with active Cloudflare Turnstile solving via human-like interaction.
 
-Anti-Detection Features:
-- Human-like random delays between actions
-- User-Agent rotation
-- Mouse movement simulation
-- Cloudflare challenge detection and waiting
-- Cookie persistence
-- Retry with exponential backoff
+Cloudflare Solving Features:
+- Detects Turnstile iframe
+- Locates checkbox within iframe
+- Human-like mouse movement (Bezier curves)
+- Natural click timing and jitter
+- Multiple retry strategies
 """
 
 import os
@@ -17,10 +16,12 @@ import re
 import sys
 import time
 import random
+import math
 import logging
 from pathlib import Path
 from urllib.parse import urljoin, unquote, quote, urlparse, parse_qs
 from DrissionPage import ChromiumPage, ChromiumOptions
+from DrissionPage.errors import ElementNotFoundError
 from curl_cffi import requests
 
 # Setup logging
@@ -34,69 +35,278 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
 
-# User-Agent Pool (Modern Chrome versions)
+# User-Agent Pool
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 ]
 
-def random_delay(min_sec=1.0, max_sec=3.0):
-    """Human-like random delay"""
-    delay = random.uniform(min_sec, max_sec)
-    time.sleep(delay)
+# =============================================================================
+# HUMAN-LIKE MOUSE MOVEMENT (Bezier Curves)
+# =============================================================================
 
-def human_delay():
-    """Short human-like pause for interactions"""
-    time.sleep(random.uniform(0.3, 0.8))
+def bezier_curve(t, points):
+    """Calculate point on a Bezier curve at parameter t (0 to 1)"""
+    n = len(points) - 1
+    x = 0
+    y = 0
+    for i, (px, py) in enumerate(points):
+        # Binomial coefficient
+        coef = math.comb(n, i) * (1 - t) ** (n - i) * t ** i
+        x += coef * px
+        y += coef * py
+    return (x, y)
 
-def clean_filename(name: str) -> str:
-    return re.sub(r'[^\w\s-]', '', name)[:50].strip().replace(' ', '_')
+def generate_human_path(start, end, steps=25):
+    """Generate human-like mouse path using Bezier curves with control points"""
+    x1, y1 = start
+    x2, y2 = end
+    
+    # Add 2-3 random control points for natural curve
+    num_control = random.randint(2, 3)
+    control_points = [(x1, y1)]
+    
+    for i in range(num_control):
+        # Control points with random offset from straight line
+        t = (i + 1) / (num_control + 1)
+        base_x = x1 + (x2 - x1) * t
+        base_y = y1 + (y2 - y1) * t
+        
+        # Random deviation (more at middle, less at ends)
+        deviation = 50 * math.sin(t * math.pi)
+        offset_x = random.uniform(-deviation, deviation)
+        offset_y = random.uniform(-deviation, deviation)
+        
+        control_points.append((base_x + offset_x, base_y + offset_y))
+    
+    control_points.append((x2, y2))
+    
+    # Generate path points
+    path = []
+    for i in range(steps + 1):
+        t = i / steps
+        # Ease in/out for natural acceleration
+        t = t * t * (3 - 2 * t)  # Smoothstep
+        point = bezier_curve(t, control_points)
+        
+        # Add micro-jitter
+        jitter_x = random.uniform(-2, 2)
+        jitter_y = random.uniform(-2, 2)
+        path.append((int(point[0] + jitter_x), int(point[1] + jitter_y)))
+    
+    return path
 
-def is_cloudflare_challenge(page) -> bool:
-    """Detect if we're on a Cloudflare challenge page"""
+def human_click_delay():
+    """Human-like delay before/after click"""
+    time.sleep(random.uniform(0.05, 0.15))
+
+# =============================================================================
+# CLOUDFLARE TURNSTILE SOLVER
+# =============================================================================
+
+def is_cloudflare_page(page) -> bool:
+    """Detect Cloudflare challenge page"""
     html = page.html.lower()
     indicators = [
         "checking your browser",
         "just a moment",
-        "cloudflare",
-        "ray id",
         "cf-browser-verification",
         "challenge-running",
-        "turnstile"
+        "turnstile",
+        "cf-turnstile",
+        "_cf_chl"
     ]
     return any(ind in html for ind in indicators)
 
-def wait_for_cloudflare(page, max_wait=120):
-    """Wait for Cloudflare challenge to complete"""
-    logger.info("Cloudflare challenge detected. Waiting...")
+def find_turnstile_iframe(page):
+    """Find the Cloudflare Turnstile iframe"""
+    logger.info("Searching for Turnstile iframe...")
+    
+    # Common Turnstile iframe selectors
+    iframe_selectors = [
+        "iframe[src*='challenges.cloudflare.com']",
+        "iframe[src*='turnstile']",
+        "iframe[title*='Cloudflare']",
+        "iframe[title*='turnstile']",
+        "iframe.cf-turnstile",
+        "[id*='cf-turnstile'] iframe",
+        "div.cf-turnstile iframe",
+    ]
+    
+    for selector in iframe_selectors:
+        try:
+            iframe = page.ele(f"css:{selector}", timeout=2)
+            if iframe:
+                logger.info(f"Found Turnstile iframe: {selector}")
+                return iframe
+        except:
+            continue
+    
+    return None
+
+def find_turnstile_checkbox(page, iframe):
+    """Find the checkbox element inside Turnstile"""
+    logger.info("Looking for Turnstile checkbox...")
+    
+    # Try to get iframe location for coordinate-based clicking
+    try:
+        # Get iframe bounding box
+        rect = iframe.rect
+        if rect:
+            iframe_x = rect.get('x', 0)
+            iframe_y = rect.get('y', 0)
+            iframe_w = rect.get('width', 300)
+            iframe_h = rect.get('height', 65)
+            
+            # Checkbox is typically in the left portion of the iframe
+            # Approximately 20-30px from left, centered vertically
+            checkbox_x = iframe_x + 28 + random.randint(-3, 3)
+            checkbox_y = iframe_y + (iframe_h / 2) + random.randint(-3, 3)
+            
+            logger.info(f"Calculated checkbox position: ({checkbox_x}, {checkbox_y})")
+            return (checkbox_x, checkbox_y)
+    except Exception as e:
+        logger.warning(f"Could not get iframe rect: {e}")
+    
+    return None
+
+def move_mouse_human(page, target_x, target_y):
+    """Move mouse to target using human-like Bezier path"""
+    try:
+        # Get current mouse position (or start from random corner)
+        start_x = random.randint(100, 400)
+        start_y = random.randint(100, 300)
+        
+        path = generate_human_path((start_x, start_y), (target_x, target_y))
+        
+        logger.info(f"Moving mouse from ({start_x},{start_y}) to ({target_x},{target_y})")
+        
+        for x, y in path:
+            page.actions.move_to(x, y)
+            time.sleep(random.uniform(0.01, 0.03))
+            
+        return True
+    except Exception as e:
+        logger.warning(f"Mouse move error: {e}")
+        return False
+
+def click_turnstile_checkbox(page, coords):
+    """Click the Turnstile checkbox with human-like behavior"""
+    x, y = coords
+    
+    try:
+        # Move mouse to target
+        move_mouse_human(page, x, y)
+        
+        # Small pause before click
+        human_click_delay()
+        
+        # Click
+        logger.info(f"Clicking at ({x}, {y})...")
+        page.actions.click()
+        
+        # Small pause after click
+        human_click_delay()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Click error: {e}")
+        return False
+
+def solve_cloudflare_turnstile(page, max_attempts=3) -> bool:
+    """Attempt to solve Cloudflare Turnstile challenge"""
+    logger.info("=" * 40)
+    logger.info("CLOUDFLARE TURNSTILE SOLVER")
+    logger.info("=" * 40)
+    
+    for attempt in range(max_attempts):
+        logger.info(f"Solve attempt {attempt + 1}/{max_attempts}")
+        
+        # Wait a bit for page to stabilize
+        time.sleep(random.uniform(2, 4))
+        
+        # Find Turnstile iframe
+        iframe = find_turnstile_iframe(page)
+        
+        if not iframe:
+            logger.warning("No Turnstile iframe found, waiting...")
+            time.sleep(3)
+            continue
+        
+        # Find checkbox coordinates
+        coords = find_turnstile_checkbox(page, iframe)
+        
+        if not coords:
+            logger.warning("Could not locate checkbox")
+            continue
+        
+        # Click the checkbox
+        if click_turnstile_checkbox(page, coords):
+            logger.info("Click performed, waiting for verification...")
+            
+            # Wait for challenge to process
+            time.sleep(random.uniform(3, 6))
+            
+            # Check if challenge is solved
+            if not is_cloudflare_page(page):
+                logger.info("SUCCESS: Cloudflare challenge solved!")
+                return True
+            else:
+                logger.warning("Challenge still present after click")
+        
+        # Exponential backoff between attempts
+        time.sleep(2 ** attempt)
+    
+    logger.error("Failed to solve Turnstile after all attempts")
+    page.get_screenshot(path="debug_turnstile_fail.png")
+    return False
+
+def wait_and_solve_cloudflare(page, max_wait=120) -> bool:
+    """Wait for and solve Cloudflare challenge"""
+    if not is_cloudflare_page(page):
+        return True
+    
+    logger.info("Cloudflare challenge detected!")
+    page.get_screenshot(path="debug_cloudflare_detected.png")
+    
     start = time.time()
     
-    while is_cloudflare_challenge(page):
+    # Try to solve actively
+    if solve_cloudflare_turnstile(page):
+        return True
+    
+    # Fallback: Just wait (some challenges auto-resolve)
+    logger.info("Active solve failed, waiting for auto-resolution...")
+    while is_cloudflare_page(page):
         if time.time() - start > max_wait:
-            logger.error("Cloudflare challenge timeout")
+            logger.error("Cloudflare timeout")
             return False
-        time.sleep(2)
-        
-    logger.info("Cloudflare challenge passed!")
-    random_delay(1, 2)
+        time.sleep(3)
+    
     return True
 
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def random_delay(min_sec=1.0, max_sec=3.0):
+    time.sleep(random.uniform(min_sec, max_sec))
+
+def clean_filename(name: str) -> str:
+    return re.sub(r'[^\w\s-]', '', name)[:50].strip().replace(' ', '_')
+
 def download_file_curl(url: str, filename: str, referer: str, cookies=None) -> bool:
-    """Download using curl_cffi with TLS fingerprint matching"""
-    logger.info(f"Downloading: {url} -> {filename}")
+    """Download using curl_cffi"""
+    logger.info(f"Downloading: {url}")
     
     try:
         headers = {
             "User-Agent": random.choice(USER_AGENTS),
             "Referer": referer,
             "Accept": "application/pdf,application/epub+zip,*/*",
-            "Accept-Language": "en-US,en;q=0.9",
         }
         
-        # Pass cookies if available
-        cookie_str = None
         if cookies:
             cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
             headers["Cookie"] = cookie_str
@@ -110,10 +320,7 @@ def download_file_curl(url: str, filename: str, referer: str, cookies=None) -> b
             allow_redirects=True
         )
         
-        if response.status_code == 403:
-            logger.error("403 Forbidden - Cloudflare blocking download")
-            return False
-        elif response.status_code != 200:
+        if response.status_code not in [200, 206]:
             logger.error(f"Download failed: {response.status_code}")
             return False
             
@@ -122,10 +329,9 @@ def download_file_curl(url: str, filename: str, referer: str, cookies=None) -> b
             f.write(response.content)
             
         size = save_path.stat().st_size
-        logger.info(f"Downloaded {size:,} bytes to {filename}")
+        logger.info(f"Downloaded {size:,} bytes")
         
         if size < 1000:
-            logger.warning("File too small, deleting.")
             save_path.unlink()
             return False
             
@@ -134,172 +340,97 @@ def download_file_curl(url: str, filename: str, referer: str, cookies=None) -> b
         logger.error(f"Download error: {e}")
         return False
 
-def process_workflow(page, query: str, retry=0) -> bool:
-    """
-    Cloudflare-Aware Workflow:
-    1. Search with Cloudflare handling
-    2. Click Book
-    3. Click Read
-    4. Extract Iframe URL
-    5. Download with cookies
-    """
-    MAX_RETRIES = 3
-    
-    if retry > 0:
-        logger.info(f"Retry attempt {retry}/{MAX_RETRIES}")
-        random_delay(3 * retry, 6 * retry)  # Exponential backoff
-    
+# =============================================================================
+# MAIN WORKFLOW
+# =============================================================================
+
+def process_workflow(page, query: str) -> bool:
+    """Main download workflow with Cloudflare solving"""
     logger.info(f"Processing: {query}")
     
-    # 1. Search
     encoded_query = quote(query)
     search_url = f"https://welib.org/search?q={encoded_query}"
     
     try:
-        logger.info(f"Navigating to: {search_url}")
+        # Navigate
         random_delay(1, 2)
         page.get(search_url)
         
-        # Check for Cloudflare
-        if is_cloudflare_challenge(page):
-            if not wait_for_cloudflare(page):
-                if retry < MAX_RETRIES:
-                    return process_workflow(page, query, retry + 1)
-                return False
+        # Handle Cloudflare
+        if not wait_and_solve_cloudflare(page):
+            return False
         
         # Wait for results
-        logger.info("Waiting for search results...")
         random_delay(2, 4)
         
-        book_element = page.ele("css:div.cursor-pointer", timeout=60) or \
-                      page.ele("css:a[href*='/text/']", timeout=10) or \
-                      page.ele("css:a[href*='/book/']", timeout=10)
-        
-        if not book_element:
-            logger.error("No search results found.")
+        book = page.ele("css:div.cursor-pointer, a[href*='/text/'], a[href*='/book/']", timeout=60)
+        if not book:
+            logger.error("No results found")
             page.get_screenshot(path="debug_no_results.png")
-            with open("debug_no_results.html", "w", encoding="utf-8") as f:
-                f.write(page.html)
-            if retry < MAX_RETRIES:
-                return process_workflow(page, query, retry + 1)
             return False
-            
-        # 2. Click Book
+        
+        # Click book
         logger.info("Clicking book...")
-        human_delay()
-        book_element.click()
+        book.click()
         random_delay(2, 3)
         
-        # Check for Cloudflare again
-        if is_cloudflare_challenge(page):
-            if not wait_for_cloudflare(page):
-                return False
-        
-        logger.info(f"On Book Page: {page.url}")
-        
-    except Exception as e:
-        logger.error(f"Navigation error: {e}")
-        try:
-            page.get_screenshot(path="debug_nav_error.png")
-        except:
-            pass
-        if retry < MAX_RETRIES:
-            return process_workflow(page, query, retry + 1)
-        return False
-
-    # 3. Click 'Read'
-    try:
-        logger.info("Looking for 'Read' button...")
-        random_delay(1, 2)
-        
-        read_element = page.ele("text:Read", timeout=30) or \
-                      page.ele("css:a[href*='/read/']", timeout=10)
-        
-        if not read_element:
-            logger.warning("Could not find Read button.")
-            page.get_screenshot(path="debug_no_read.png")
+        if not wait_and_solve_cloudflare(page):
             return False
-            
+        
+        # Find Read button
+        read = page.ele("text:Read", timeout=30) or page.ele("css:a[href*='/read/']", timeout=10)
+        if not read:
+            logger.warning("No Read button")
+            return False
+        
         logger.info("Clicking Read...")
-        human_delay()
-        read_element.click()
+        read.click()
         random_delay(3, 5)
         
-        # Check for Cloudflare
-        if is_cloudflare_challenge(page):
-            if not wait_for_cloudflare(page):
-                return False
-        
-        logger.info(f"On Viewer Page: {page.url}")
-        
-    except Exception as e:
-        logger.error(f"Read button error: {e}")
-        return False
-        
-    # 4. Wait for Iframe
-    logger.info("Waiting for viewer iframe...")
-    try:
-        random_delay(2, 4)
-        
-        iframe_element = page.ele("css:iframe#viewer_frame", timeout=60) or \
-                        page.ele("css:iframe[src*='fast_view']", timeout=10) or \
-                        page.ele("css:iframe[src*='web-premium']", timeout=10)
-        
-        if not iframe_element:
-            logger.error("Could not find viewer iframe.")
-            page.get_screenshot(path="debug_no_iframe.png")
-            with open("debug_no_iframe.html", "w", encoding="utf-8") as f:
-                f.write(page.html)
+        if not wait_and_solve_cloudflare(page):
             return False
         
-        src = iframe_element.attr("src")
+        # Find iframe
+        iframe = page.ele("css:iframe#viewer_frame, iframe[src*='fast_view'], iframe[src*='web-premium']", timeout=60)
+        if not iframe:
+            logger.error("No viewer iframe")
+            return False
+        
+        src = iframe.attr("src")
         if not src:
-            logger.error("Iframe has no src.")
             return False
-            
-        logger.info(f"Found Iframe Src: {src}")
         
-        # 5. Extract & Decode
+        # Extract URL
         full_src = urljoin("https://welib.org", src)
         parsed = urlparse(full_src)
         qs = parse_qs(parsed.query)
         
-        real_url_encoded = qs.get('url', [None])[0]
-        if not real_url_encoded:
-            logger.warning(f"No 'url' param in src: {src}")
+        real_url = qs.get('url', [None])[0]
+        if not real_url:
             return False
-            
-        real_url = unquote(real_url_encoded)
-        logger.info(f"Decoded URL: {real_url}")
+        
+        real_url = unquote(real_url)
+        logger.info(f"Download URL: {real_url}")
         
         if not real_url.startswith("http"):
-            logger.warning("Invalid decoded URL.")
             return False
-            
-        # Get cookies for download
-        cookies = page.cookies()
-            
-        # 6. Download
+        
+        # Download
         safe_title = clean_filename(query)
         ext = ".pdf"
         if ".epub" in real_url: ext = ".epub"
         elif ".mobi" in real_url: ext = ".mobi"
         
-        filename = f"{safe_title}{ext}"
-        
-        return download_file_curl(real_url, filename, referer=page.url, cookies=cookies)
+        return download_file_curl(real_url, f"{safe_title}{ext}", page.url, page.cookies())
 
     except Exception as e:
-        logger.error(f"Iframe error: {e}")
-        try:
-            page.get_screenshot(path="debug_iframe_error.png")
-        except:
-            pass
+        logger.error(f"Workflow error: {e}")
+        page.get_screenshot(path="debug_error.png")
         return False
 
 def main():
     logger.info("=" * 60)
-    logger.info("WeLib Downloader - Cloudflare Bypass Edition")
+    logger.info("WeLib Downloader - Cloudflare SOLVER Edition")
     logger.info("=" * 60)
     
     DOWNLOADS_DIR.mkdir(exist_ok=True)
@@ -307,13 +438,11 @@ def main():
     if not SEARCH_TERMS_FILE.exists():
         logger.error("search_terms.txt not found!")
         sys.exit(1)
-        
-    search_terms = [l.strip() for l in SEARCH_TERMS_FILE.read_text(encoding='utf-8-sig').split('\n') if l.strip()]
-    logger.info(f"Loaded {len(search_terms)} search terms.")
     
-    # Setup ChromiumPage with anti-detection options
-    # NOTE: NOT using headless - Cloudflare detects it
-    # GitHub Actions will use Xvfb virtual display
+    search_terms = [l.strip() for l in SEARCH_TERMS_FILE.read_text(encoding='utf-8-sig').split('\n') if l.strip()]
+    logger.info(f"Loaded {len(search_terms)} terms")
+    
+    # Browser options - NOT headless (Cloudflare detects it)
     options = ChromiumOptions()
     options.set_argument('--no-sandbox')
     options.set_argument('--disable-gpu')
@@ -322,42 +451,34 @@ def main():
     options.set_argument(f'--user-agent={random.choice(USER_AGENTS)}')
     options.set_argument('--start-maximized')
     
-    logger.info("Launching Browser (DrissionPage/DevTools Protocol)...")
+    logger.info("Launching browser...")
     page = ChromiumPage(options)
     
-    # Initial warmup - visit homepage first
-    logger.info("Warming up browser session...")
+    # Warmup
+    logger.info("Warming up...")
     try:
         page.get("https://welib.org")
         random_delay(3, 5)
-        
-        if is_cloudflare_challenge(page):
-            wait_for_cloudflare(page)
+        wait_and_solve_cloudflare(page)
     except Exception as e:
-        logger.warning(f"Warmup warning: {e}")
+        logger.warning(f"Warmup issue: {e}")
     
-    success_count = 0
-    fail_count = 0
+    success = 0
+    fail = 0
     
     for term in search_terms:
-        try:
-            if process_workflow(page, term):
-                logger.info(f"SUCCESS: {term}")
-                success_count += 1
-            else:
-                logger.error(f"FAILED: {term}")
-                fail_count += 1
-        except Exception as e:
-            logger.error(f"Exception: {e}")
-            fail_count += 1
-            
-        # Longer delay between books
+        if process_workflow(page, term):
+            logger.info(f"SUCCESS: {term}")
+            success += 1
+        else:
+            logger.error(f"FAILED: {term}")
+            fail += 1
         random_delay(5, 10)
     
     logger.info("=" * 60)
-    logger.info(f"COMPLETE: {success_count} success, {fail_count} failed")
+    logger.info(f"DONE: {success} success, {fail} failed")
     logger.info("=" * 60)
-        
+    
     page.quit()
 
 if __name__ == "__main__":
