@@ -2,8 +2,8 @@
 """
 Ebook Download via Anna's Archive -> External Mirror (LibGen)
 Uses curl_cffi for TLS fingerprint impersonation to bypass blocks on ALL steps.
-Strategy: Anna's Archive (Search) -> LibGen Mirror (Page) -> File (Download)
-Now with Strict Title Validation and Dynamic Extension Detection.
+Strategy: Anna's Archive (Search) -> Constructed Mirror Link (MD5) -> File (Download)
+Now with MD5 Link Construction, IPFS Handling, and Strict Validation.
 """
 
 import os
@@ -13,6 +13,7 @@ import time
 import logging
 import mimetypes
 from pathlib import Path
+from urllib.parse import urljoin
 from curl_cffi import requests as curl_requests
 import requests # retained for FlareSolverr communication only
 
@@ -209,8 +210,8 @@ def download_file(url: str, base_filename: str, referer: str = None) -> bool:
         return False
 
 
-def resolve_libgen_mirror(mirror_url: str) -> str:
-    """Visit LibGen/Library.lol mirror page and extract the real 'GET' link"""
+def resolve_mirror(mirror_url: str) -> str:
+    """Visit LibGen/IPFS mirror page and extract the real 'GET' link"""
     logger.info(f"Resolving mirror: {mirror_url}")
     html = get_page_with_curl(mirror_url)
     if not html:
@@ -222,13 +223,13 @@ def resolve_libgen_mirror(mirror_url: str) -> str:
         r'<a[^>]+href="([^"]+)"[^>]*>\s*GET\s*</a>',
         r'<a[^>]+href="([^"]+)"[^>]*>.*?GET.*?</a>',
         r'<a[^>]+href="([^"]+)"[^>]*>\s*Cloudflare\s*</a>',
+        r'<a[^>]+href="([^"]+)"[^>]*>\s*IPFS\.io\s*</a>',
     ]
     
     for pattern in patterns:
         matches = re.findall(pattern, html, re.IGNORECASE)
         for link in matches:
             if not link.startswith('http'):
-                from urllib.parse import urljoin
                 link = urljoin(mirror_url, link)
             
             logger.info(f"Found true download link: {link}")
@@ -238,47 +239,74 @@ def resolve_libgen_mirror(mirror_url: str) -> str:
     return None
 
 
-def get_external_mirrors(book_url: str) -> list:
-    """Extract external mirror links (LibGen, etc) from Anna's book page"""
-    logger.info(f"Checking {book_url} for external mirrors...")
+def get_download_mirrors(book_url: str) -> list:
+    """Extract and prioritize download mirrors (Constructed > IPFS > Scraped)"""
+    logger.info(f"Checking {book_url} for mirrors...")
+    
+    mirrors = []
+    
+    # 1. MD5 Calculated Link (Highest Priority)
+    # Extract MD5 from URL: .../md5/{md5}
+    md5_match = re.search(r'/md5/([a-fA-F0-9]{32})', book_url)
+    if md5_match:
+        md5 = md5_match.group(1)
+        constructed_link = f"http://library.lol/main/{md5}"
+        mirrors.append({"url": constructed_link, "type": "constructed_libgen"})
+        logger.info(f"Constructed LibGen link: {constructed_link}")
     
     html = get_page_with_curl(book_url)
     if not html:
-        return []
+        return mirrors # Return at least constructed link if page fails
 
     # Save debug HTML
     try:
         with open('/tmp/annas_book_debug.html', 'w', encoding='utf-8') as f:
             f.write(html)
-        logger.info(f"Saved debug HTML ({len(html)} chars) to /tmp/annas_book_debug.html")
-    except Exception as e:
-        logger.warning(f"Failed to save debug HTML: {e}")
+    except:
+        pass
         
-    mirrors = []
+    # 2. IPFS Links (Medium Priority)
+    # Look for /ipfs_downloads/ or ipfs:// links
+    ipfs_patterns = [
+        r'href="([^"]*\/ipfs_downloads\/[^"]*)"',
+        r'href="(ipfs://[^"]+)"',
+    ]
     
+    for pattern in ipfs_patterns:
+        matches = re.findall(pattern, html, re.IGNORECASE)
+        for link in matches:
+            if link.startswith('/'):
+                # Handle relative URL: /ipfs_downloads/...
+                # Need to determine base domain from book_url
+                base_domain = "https://" + book_url.split('/')[2]
+                link = urljoin(base_domain, link)
+            
+            if link not in [m["url"] for m in mirrors]:
+                mirrors.append({"url": link, "type": "ipfs"})
+                logger.info(f"Found IPFS mirror: {link}")
+
+    # 3. External Mirrors (Lowest Priority)
     patterns = [
         r'href="(https?://library\.lol/[^"]+)"',
         r'href="(https?://libgen\.li/[^"]+)"',
         r'href="(https?://libgen\.rs/[^"]+)"',
         r'href="(https?://libgen\.is/[^"]+)"',
         r'href="(https?://[^"]*z-library[^"]+)"',
-        r'<a[^>]+href="([^"]+)"[^>]*>.*?LibGen.*?</a>',
-        r'<a[^>]+href="([^"]+)"[^>]*>.*?Library.*?</a>',
     ]
     
     for pattern in patterns:
         matches = re.findall(pattern, html, re.IGNORECASE)
         for link in matches:
-            if link not in mirrors:
-                mirrors.append(link)
-                logger.info(f"Found external mirror: {link}")
+            if link not in [m["url"] for m in mirrors]:
+                mirrors.append({"url": link, "type": "scraped_external"})
+                logger.info(f"Found scraped mirror: {link}")
                 
     return mirrors
 
 
 def search_annas_archive(query: str) -> dict:
     """Search Anna's Archive with Strict Title Validation"""
-    query_terms = [t.lower() for t in query.split() if len(t) > 2] # ignore small words
+    query_terms = [t.lower() for t in query.split() if len(t) > 2] 
     
     for domain in ANNAS_ARCHIVE_DOMAINS:
         encoded_query = query.replace(' ', '+')
@@ -289,40 +317,29 @@ def search_annas_archive(query: str) -> dict:
         if result and result.get("html"):
             html = result["html"]
             
-            # Save search HTML for debugging
             with open('/tmp/annas_search_debug.html', 'w', encoding='utf-8') as f:
                 f.write(html[:50000])
 
-            # Extract ALL search results
-            # Typical structure: <a href="/md5/..." ...>Title...</a>
-            # We capture the link and some surrounding text
-            # This regex is broad to catch different layouts
             matches = re.finditer(r'<a[^>]*href="(/md5/[a-fA-F0-9]{32})"[^>]*>(.*?)</a>', html, re.DOTALL | re.IGNORECASE)
             
             found_results = []
             for match in matches:
                 link = match.group(1)
                 raw_text = match.group(2)
-                # Clean text: remove HTML tags
                 text = re.sub(r'<[^>]+>', ' ', raw_text).strip()
-                # Remove extra spaces
                 text = re.sub(r'\s+', ' ', text)
                 
                 found_results.append({"url": f"https://{domain}{link}", "title": text})
 
             logger.info(f"Found {len(found_results)} potential results")
             
-            # Title Validation
             for res in found_results:
                 title_lower = res["title"].lower()
-                # Check if ALL significant query terms are in the title
                 match_score = sum(1 for term in query_terms if term in title_lower)
-                
-                # If we match most terms (e.g. 2 out of 3), it's a good candidate
                 required_matches = max(1, len(query_terms) - 1) 
                 
                 if match_score >= required_matches:
-                    logger.info(f"Match found: '{res['title']}' (Score: {match_score}/{len(query_terms)})")
+                    logger.info(f"Match found: '{res['title']}'")
                     return {"url": res["url"], "title": res["title"]}
                 else:
                     logger.debug(f"Skipping mismatch: '{res['title']}'")
@@ -345,24 +362,26 @@ def process_search(query: str) -> bool:
     book_url = result["url"]
     base_filename = clean_filename(result["title"])
     
-    # 2. Get External Mirrors
-    mirrors = get_external_mirrors(book_url)
+    # 2. Get prioritized mirrors (Constructed > IPFS > Scraped)
+    mirrors = get_download_mirrors(book_url)
     if not mirrors:
-        logger.error("No external mirrors found")
-        # Try finding ANY link if mirrors specific failed? 
-        # For now, rely on regex improvements
+        logger.error("No mirrors found (and MD5 construction failed)")
         return False
         
     # 3. Resolve and Download
-    for i, mirror in enumerate(mirrors):
-        logger.info(f"Trying mirror {i+1}/{len(mirrors)}: {mirror}")
+    for i, mirror_info in enumerate(mirrors):
+        mirror_url = mirror_info["url"]
+        mirror_type = mirror_info["type"]
+        logger.info(f"Trying mirror {i+1}/{len(mirrors)} ({mirror_type}): {mirror_url}")
         
-        download_link = resolve_libgen_mirror(mirror)
+        # Determine if we need to resolve it (LibGen/IPFS usually needs resolving)
+        # Or if it's a direct file link (rare)
+        download_link = resolve_mirror(mirror_url)
         if not download_link:
             continue
             
         # Download (dynamic extension inside)
-        if download_file(download_link, base_filename, referer=mirror):
+        if download_file(download_link, base_filename, referer=mirror_url):
             logger.info(f"Successfully downloaded book for: {query}")
             return True
             
@@ -373,7 +392,7 @@ def process_search(query: str) -> bool:
 
 
 def main():
-    logger.info("Ebook Download - External Mirrors + Strict Validation")
+    logger.info("Ebook Download - MD5 Construction + Prioritization")
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     
     create_session()
