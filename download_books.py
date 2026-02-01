@@ -218,17 +218,29 @@ def get_external_mirrors(book_url: str) -> list:
     html = get_page_with_curl(book_url)
     if not html:
         return []
+
+    # Save debug HTML
+    try:
+        with open('/tmp/annas_book_debug.html', 'w', encoding='utf-8') as f:
+            f.write(html)
+        logger.info(f"Saved debug HTML ({len(html)} chars) to /tmp/annas_book_debug.html")
+    except Exception as e:
+        logger.warning(f"Failed to save debug HTML: {e}")
         
     mirrors = []
     
     # Targeting "External Downloads" section
     # library.lol, libgen.li, libgen.rs
+    # Loosened regex to capture more variations
     patterns = [
         r'href="(https?://library\.lol/[^"]+)"',
         r'href="(https?://libgen\.li/[^"]+)"',
         r'href="(https?://libgen\.rs/[^"]+)"',
         r'href="(https?://libgen\.is/[^"]+)"',
         r'href="(https?://[^"]*z-library[^"]+)"',
+        # Catches any link text that looks like a known mirror
+        r'<a[^>]+href="([^"]+)"[^>]*>.*?LibGen.*?</a>',
+        r'<a[^>]+href="([^"]+)"[^>]*>.*?Library.*?</a>',
     ]
     
     for pattern in patterns:
