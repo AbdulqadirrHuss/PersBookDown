@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Ebook Download via WeLib Strict Workflow (Playwright Version)
+Ebook Download via WeLib Strict Workflow (DrissionPage Version)
 Strategy: Search -> Click Book -> Click 'Read' -> Find Iframe -> Decode URL -> Download
-Constaint: NO LibGen, NO 'Download' buttons.
-Uses Playwright to handle JS rendering and specific element waits.
+Uses DrissionPage (DevTools Protocol) to bypass Cloudflare detection.
 """
 
 import os
@@ -12,9 +11,8 @@ import sys
 import time
 import logging
 from pathlib import Path
-from urllib.parse import urljoin, unquote, quote
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import Stealth
+from urllib.parse import urljoin, unquote, quote, urlparse, parse_qs
+from DrissionPage import ChromiumPage, ChromiumOptions
 from curl_cffi import requests
 
 # Setup logging
@@ -28,46 +26,30 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
 
-def get_proxies():
-    """Get proxy configuration from environment"""
-    proxy_url = os.environ.get("PROXY_URL")
-    if proxy_url:
-        # Chromium (Playwright) doesn't support socks5h://, replace with socks5://
-        if proxy_url.startswith("socks5h://"):
-            proxy_url = proxy_url.replace("socks5h://", "socks5://")
-        return {"server": proxy_url}
-    return None
-
 def clean_filename(name: str) -> str:
     return re.sub(r'[^\w\s-]', '', name)[:50].strip().replace(' ', '_')
 
 def download_file_curl(url: str, filename: str, referer: str) -> bool:
-    """Perform the direct download using curl_cffi for robust TLS impersonation"""
-    logger.info(f"Starting Download (curl_cffi): {url} -> {filename}")
+    """Perform the direct download using curl_cffi for robust TLS"""
+    logger.info(f"Downloading: {url} -> {filename}")
     
-    proxies = None
-    env_proxy = os.environ.get("PROXY_URL")
-    if env_proxy:
-        proxies = {"http": env_proxy, "https": env_proxy}
-
     try:
         headers = {
-             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
              "Referer": referer
         }
             
         response = requests.get(
             url,
             headers=headers,
-            proxies=proxies,
-            impersonate="chrome110",
+            impersonate="chrome120",
             timeout=300, 
             verify=False,
             allow_redirects=True
         )
         
         if response.status_code != 200:
-            logger.error(f"Download request failed: {response.status_code}")
+            logger.error(f"Download failed: {response.status_code}")
             return False
             
         save_path = DOWNLOADS_DIR / filename
@@ -84,19 +66,19 @@ def download_file_curl(url: str, filename: str, referer: str) -> bool:
             
         return True
     except Exception as e:
-        logger.error(f"Download fatal error: {e}")
+        logger.error(f"Download error: {e}")
         return False
 
 def process_workflow(page, query: str) -> bool:
     """
-    Strict Workflow with Playwright:
+    Strict Workflow with DrissionPage:
     1. Search & Wait
-    2. Click Book & Wait
-    3. Click Read & Wait
+    2. Click Book
+    3. Click Read
     4. Find Iframe -> Extract Src
     5. Decode -> Download
     """
-    logger.info(f"Processing Search: {query}")
+    logger.info(f"Processing: {query}")
     
     # 1. Search
     encoded_query = quote(query)
@@ -104,75 +86,52 @@ def process_workflow(page, query: str) -> bool:
     
     logger.info(f"Navigating to: {search_url}")
     try:
-        page.goto(search_url, timeout=60000, wait_until="domcontentloaded")
+        page.get(search_url)
         
-        # Explicit Wait for results
-        # "Wait for elements with class div.cursor-pointer or the generic img[alt]"
+        # Wait for search results (up to 60s)
         logger.info("Waiting for search results...")
-        try:
-            page.wait_for_selector("div.cursor-pointer, img[alt]", timeout=60000)
-        except PlaywrightTimeoutError:
-            logger.error("Timeout waiting for search results.")
-            page.screenshot(path="debug_error.png")
+        book_selector = "div.cursor-pointer, a[href*='/text/'], a[href*='/book/']"
+        
+        book_element = page.ele(book_selector, timeout=60)
+        if not book_element:
+            logger.error("No search results found.")
+            page.get_screenshot(path="debug_error.png")
             with open("debug_error.html", "w", encoding="utf-8") as f:
-                f.write(page.content())
+                f.write(page.html)
             return False
             
         # 2. Click Book
-        # We need to find the link that looks like a book.
-        # usually inside the div.cursor-pointer or wrapping the img.
-        # We prefer a link with /text/ or /book/
-        
-        # Strategy: Get all links and filter
-        # OR: click the first div.cursor-pointer
-        
         logger.info("Clicking first book result...")
-        # Finding the first suitable book card
-        book_locator = page.locator("div.cursor-pointer").first
-        if not book_locator.count():
-             # Fallback to links containing /text/ or /book/
-             book_locator = page.locator("a[href*='/text/'], a[href*='/book/']").first
-             
-        if not book_locator.count():
-            logger.warning("No book links found.")
-            return False
-            
-        # Capture URL for logging (optional)
-        # click it
-        with page.expect_navigation(timeout=30000):
-            book_locator.click()
-            
-        logger.info(f"Landed on Book Page: {page.url}")
+        book_element.click()
+        page.wait.load_start()
+        
+        logger.info(f"On Book Page: {page.url}")
         
     except Exception as e:
-        logger.error(f"Navigation/Search error: {e}")
+        logger.error(f"Search/Navigation error: {e}")
+        try:
+            page.get_screenshot(path="debug_error.png")
+        except:
+            pass
         return False
 
     # 3. Click 'Read'
     try:
-        # "Locate and click the blue 'Read' button."
-        # Selectors: text="Read", a[href*="/read/"], .btn-primary containing Read
         logger.info("Looking for 'Read' button...")
         
-        read_locator = page.locator("text=Read").first
-        if not read_locator.count():
-             read_locator = page.locator("a[href*='/read/']").first
-             
-        if not read_locator.count():
+        # Wait and find Read button
+        read_element = page.ele("text:Read", timeout=30) or page.ele("a[href*='/read/']", timeout=10)
+        
+        if not read_element:
             logger.warning("Could not find Read button.")
-            page.screenshot(path="debug_no_read_button.png")
+            page.get_screenshot(path="debug_no_read.png")
             return False
             
-        # Click and wait for the viewer
         logger.info("Clicking Read...")
+        read_element.click()
+        page.wait.load_start()
         
-        # This might open in new tab or same tab. We assume same tab or handle popup.
-        # Note: If it opens a new tab, page.on('popup') is better, but let's try strict navigation first.
-        # Often these simple sites just navigate.
-        with page.expect_navigation(timeout=30000):
-            read_locator.click()
-            
-        logger.info(f"Landed on Viewer Page: {page.url}")
+        logger.info(f"On Viewer Page: {page.url}")
         
     except Exception as e:
         logger.error(f"Error clicking Read: {e}")
@@ -181,26 +140,29 @@ def process_workflow(page, query: str) -> bool:
     # 4. Wait for Iframe
     logger.info("Waiting for viewer iframe...")
     try:
-        # "Wait for the DOM to load the element <iframe id='viewer_frame'> (or ... containing web-premium or fast_view)"
-        selector = "iframe#viewer_frame, iframe[src*='fast_view'], iframe[src*='web-premium']"
-        page.wait_for_selector(selector, timeout=60000)
+        # Look for iframe with viewer_frame id or fast_view/web-premium in src
+        iframe_element = page.ele("iframe#viewer_frame", timeout=60) or \
+                        page.ele("iframe[src*='fast_view']", timeout=10) or \
+                        page.ele("iframe[src*='web-premium']", timeout=10)
         
-        iframe_element = page.locator(selector).first
-        src = iframe_element.get_attribute("src")
+        if not iframe_element:
+            logger.error("Could not find viewer iframe.")
+            page.get_screenshot(path="debug_no_iframe.png")
+            with open("debug_iframe.html", "w", encoding="utf-8") as f:
+                f.write(page.html)
+            return False
         
+        src = iframe_element.attr("src")
         if not src:
-            logger.error("Iframe found but no src attribute.")
+            logger.error("Iframe has no src attribute.")
             return False
             
         logger.info(f"Found Iframe Src: {src}")
         
         # 5. Extract & Decode
-        # Format: /fast_view?url=ENCODED_URL
-        
         full_src = urljoin("https://welib.org", src)
-        import urllib.parse
-        parsed = urllib.parse.urlparse(full_src)
-        qs = urllib.parse.parse_qs(parsed.query)
+        parsed = urlparse(full_src)
+        qs = parse_qs(parsed.query)
         
         real_url_encoded = qs.get('url', [None])[0]
         if not real_url_encoded:
@@ -208,10 +170,10 @@ def process_workflow(page, query: str) -> bool:
             return False
             
         real_url = unquote(real_url_encoded)
-        logger.info(f"Decoded Real URL: {real_url}")
+        logger.info(f"Decoded URL: {real_url}")
         
         if not real_url.startswith("http"):
-            logger.warning("Decoded URL invalid.")
+            logger.warning("Invalid decoded URL.")
             return False
             
         # 6. Download
@@ -225,12 +187,15 @@ def process_workflow(page, query: str) -> bool:
         return download_file_curl(real_url, filename, referer=page.url)
 
     except Exception as e:
-        logger.error(f"Error waiting for iframe: {e}")
-        page.screenshot(path="debug_iframe_error.png")
+        logger.error(f"Iframe error: {e}")
+        try:
+            page.get_screenshot(path="debug_iframe_error.png")
+        except:
+            pass
         return False
 
 def main():
-    logger.info("Starting WeLib Playwright Workflow...")
+    logger.info("Starting WeLib DrissionPage Workflow...")
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     
     if not SEARCH_TERMS_FILE.exists():
@@ -240,50 +205,28 @@ def main():
     search_terms = [l.strip() for l in SEARCH_TERMS_FILE.read_text(encoding='utf-8-sig').split('\n') if l.strip()]
     logger.info(f"Loaded {len(search_terms)} terms.")
     
-    # Launch Playwright
-    with sync_playwright() as p:
-        # Launch Browser
-        # If proxy env set, use it. But usually Tor runs on localhost:9050.
-        # We let requests handle the download proxy, but browser might need it too to access welib.
-        # Note: WeLib might block Tor? If so, browser needs to be direct?
-        # User said "Replace all others", didn't strictly say "Use Tor".
-        # But previous code used Tor.
-        # If running in GitHub Actions with tor service, PROXY_URL is set.
-        # We apply proxy to context.
-        
-        proxy_config = None # Force Direct Connection (ignore env proxy for Playwright)
-        browser_args = ["--no-sandbox", "--disable-setuid-sandbox"]
-        
-        logger.info("Launching Browser (Direct Connection)...")
-        browser = p.chromium.launch(headless=True, args=browser_args)
-        
-        context_args = {
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-            "viewport": {"width": 1280, "height": 720}
-        }
-        # Proxy removed from context_args
+    # Setup ChromiumPage with headless options for CI
+    options = ChromiumOptions()
+    options.headless()
+    options.set_argument('--no-sandbox')
+    options.set_argument('--disable-gpu')
+    options.set_argument('--disable-dev-shm-usage')
+    
+    logger.info("Launching Browser (DrissionPage/DevTools)...")
+    page = ChromiumPage(options)
+    
+    for term in search_terms:
+        try:
+            if process_workflow(page, term):
+                logger.info(f"SUCCESS: {term}")
+            else:
+                logger.error(f"FAILED: {term}")
+        except Exception as e:
+            logger.error(f"Workflow Exception: {e}")
             
-        context = browser.new_context(**context_args)
+        time.sleep(5)
         
-        # CRITICAL: Apply stealth to context BEFORE creating pages
-        stealth = Stealth()
-        stealth.apply_stealth_sync(context)
-        logger.info("Stealth applied to context.")
-        
-        page = context.new_page()
-        
-        for term in search_terms:
-            try:
-                if process_workflow(page, term):
-                    logger.info(f"SUCCESS: {term}")
-                else:
-                    logger.error(f"FAILED: {term}")
-            except Exception as e:
-                logger.error(f"Workflow Exception: {e}")
-                
-            time.sleep(5)
-            
-        browser.close()
+    page.quit()
 
 if __name__ == "__main__":
     main()
