@@ -408,9 +408,21 @@ def process_workflow(page, query: str) -> bool:
             return False
         
         # Find Read button
-        read = page.ele("text:Read", timeout=30) or page.ele("css:a[href*='/read/']", timeout=10)
+        logger.info("Looking for 'Read' button...")
+        # Selector strategy based on user feedback:
+        # <a href="/slow_download... ... Read ... </a>
+        read = page.ele("css:a[href*='/slow_download']", timeout=10) or \
+               page.ele("css:a[href*='/read/']", timeout=10) or \
+               page.ele("text:Read", timeout=5)
+        
+        if not read:
+            logger.warning("No Read button found. Trying backup search...")
+            # Backup: search for any link containing 'Read' text
+            read = page.ele("xpath://a[contains(text(), 'Read')]", timeout=5)
+            
         if not read:
             logger.warning("No Read button")
+            page.get_screenshot(path="debug_no_read.png")
             return False
         
         logger.info("Clicking Read...")
