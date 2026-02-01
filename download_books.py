@@ -27,10 +27,10 @@ SEARCH_TERMS_FILE = Path("search_terms.txt")
 
 # LibGen Mirrors
 LIBGEN_MIRRORS = [
-    "https://libgen.rs",
-    "https://libgen.li",
-    "https://libgen.st",
-    "https://libgen.is",
+    "https://libgen.bz",
+    "https://libgen.la", 
+    "https://libgen.vg",
+    "https://libgen.gl",
 ]
 
 def get_proxies():
