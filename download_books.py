@@ -109,7 +109,7 @@ def process_workflow(page, query: str) -> bool:
         # "Wait for elements with class div.cursor-pointer or the generic img[alt]"
         logger.info("Waiting for search results...")
         try:
-            page.wait_for_selector("div.cursor-pointer, img[alt]", timeout=20000)
+            page.wait_for_selector("div.cursor-pointer, img[alt]", timeout=60000)
         except PlaywrightTimeoutError:
             logger.error("Timeout waiting for search results.")
             page.screenshot(path="debug_error.png")
@@ -182,7 +182,7 @@ def process_workflow(page, query: str) -> bool:
     try:
         # "Wait for the DOM to load the element <iframe id='viewer_frame'> (or ... containing web-premium or fast_view)"
         selector = "iframe#viewer_frame, iframe[src*='fast_view'], iframe[src*='web-premium']"
-        page.wait_for_selector(selector, timeout=20000)
+        page.wait_for_selector(selector, timeout=60000)
         
         iframe_element = page.locator(selector).first
         src = iframe_element.get_attribute("src")
@@ -250,19 +250,17 @@ def main():
         # If running in GitHub Actions with tor service, PROXY_URL is set.
         # We apply proxy to context.
         
-        proxy_config = get_proxies()
+        proxy_config = None # Force Direct Connection (ignore env proxy for Playwright)
         browser_args = ["--no-sandbox", "--disable-setuid-sandbox"]
         
-        logger.info("Launching Browser...")
+        logger.info("Launching Browser (Direct Connection)...")
         browser = p.chromium.launch(headless=True, args=browser_args)
         
         context_args = {
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
             "viewport": {"width": 1280, "height": 720}
         }
-        if proxy_config:
-            logger.info(f"Using Proxy for Browser: {proxy_config['server']}")
-            context_args["proxy"] = proxy_config
+        # Proxy removed from context_args
             
         context = browser.new_context(**context_args)
         page = context.new_page()
