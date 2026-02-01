@@ -35,8 +35,14 @@ LIBGEN_MIRRORS = [
 
 def get_proxies():
     """Get proxy configuration from environment"""
+    # Debug: Print all PROXY_ env vars
+    for k, v in os.environ.items():
+        if k.startswith("PROXY_"):
+            logger.info(f"DEBUG ENV: {k}={v}")
+            
     proxy_url = os.environ.get("PROXY_URL")
     if proxy_url:
+        logger.info(f"Confirmed Proxy in Script: {proxy_url}")
         return {"http": proxy_url, "https": proxy_url}
     return None
 

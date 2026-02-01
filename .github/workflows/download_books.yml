@@ -45,7 +45,7 @@ jobs:
           echo "Search terms:"
           cat -n search_terms.txt
       
-      - name: Download books via LibGen (Tor)
+      - name: Download books
         env:
           PROXY_URL: "socks5h://localhost:9050"
         run: python download_books.py
