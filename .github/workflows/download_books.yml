@@ -11,53 +11,45 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    
+    timeout-minutes: 30
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-      
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
-      
+          python-version: '3.11'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
-      - name: Install Chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-      
-      - name: Create directories
+
+      - name: Create downloads directory
         run: mkdir -p downloads
-      
+
       - name: Parse search terms
         run: |
-          echo "=== Parsing search terms ==="
-          echo '${{ github.event.inputs.search_terms }}' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' > search_terms.txt
-          echo "Search terms:"
+          echo "=== Search Terms ==="
+          echo '${{ github.event.inputs.search_terms }}' \
+            | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | grep -v '^$' \
+            > search_terms.txt
+          echo "Will search for:"
           cat -n search_terms.txt
-      
-      - name: Install Xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb
-      
+
       - name: Download books
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python download_books.py
-        continue-on-error: true
-      
-      - name: Show debug info
+        run: python download_books.py
+
+      - name: Show results
         if: always()
         run: |
           echo "=== Downloaded Files ==="
-          ls -lah downloads/ 2>/dev/null || echo "No files"
-          echo ""
-          echo "=== Debug Files ==="
-          ls -lah /tmp/*.html 2>/dev/null || echo "No debug files"
-      
+          ls -lah downloads/ 2>/dev/null || echo "No files downloaded"
+
       - name: Upload downloads
         uses: actions/upload-artifact@v4
         with:
@@ -65,12 +57,3 @@ jobs:
           path: downloads/
           retention-days: 7
           if-no-files-found: warn
-      
-      - name: Upload debug files
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-responses
-          path: /tmp/*.html
-          retention-days: 1
-          if-no-files-found: ignore
