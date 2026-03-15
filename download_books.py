@@ -1,670 +1,387 @@
 #!/usr/bin/env python3
 """
-Ebook Download via WeLib - Cloudflare Solver Edition
-Uses DrissionPage with active Cloudflare Turnstile solving via human-like interaction.
-
-Cloudflare Solving Features:
-- Detects Turnstile iframe
-- Locates checkbox within iframe
-- Human-like mouse movement (Bezier curves)
-- Natural click timing and jitter
-- Multiple retry strategies
-"""
-
-import os
-import re
+Ebook Downloader — LibGen API Edition
+--------------------------------------
+No browser automation. No Cloudflare. No Selenium.
+Pipeline:
+  1. Search libgen.rs → get result IDs (HTML parse, one table)
+    2. libgen.is/json.php → get MD5 + metadata (pure JSON, no scraping)
+      3. library.lol/main/{md5} → parse direct download link
+        4. Stream download to disk
+        """
 import sys
 import time
 import random
-import math
 import logging
 from pathlib import Path
-from urllib.parse import urljoin, unquote, quote, urlparse, parse_qs
-from DrissionPage import ChromiumPage, ChromiumOptions
-from DrissionPage.errors import ElementNotFoundError
-from curl_cffi import requests
+import requests
+from bs4 import BeautifulSoup
 
-# Setup logging
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-# Constants
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 DOWNLOADS_DIR = Path("downloads")
 SEARCH_TERMS_FILE = Path("search_terms.txt")
+LIBGEN_SEARCH_URL = "https://libgen.rs/search.php"
+LIBGEN_JSON_URL = "https://libgen.is/json.php"
+LIBRARY_LOL_URL = "https://library.lol/main/{md5}"
+# Fallback mirrors if library.lol download link is absent
+LIBGEN_LI_DL = "https://libgen.li/ads.php?md5={md5}"
 
-# User-Agent Pool
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-]
+HEADERS = {
+        "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+}
 
-# =============================================================================
-# HUMAN-LIKE MOUSE MOVEMENT (Bezier Curves)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# HTTP session
+# ---------------------------------------------------------------------------
+session = requests.Session()
+session.headers.update(HEADERS)
 
-def bezier_curve(t, points):
-    """Calculate point on a Bezier curve at parameter t (0 to 1)"""
-    n = len(points) - 1
-    x = 0
-    y = 0
-    for i, (px, py) in enumerate(points):
-        # Binomial coefficient
-        coef = math.comb(n, i) * (1 - t) ** (n - i) * t ** i
-        x += coef * px
-        y += coef * py
-    return (x, y)
+# ---------------------------------------------------------------------------
+# Step 1 — Search
+# ---------------------------------------------------------------------------
+def search_libgen(query: str, max_results: int = 10) -> list[str]:
+    """
+        Search libgen.rs and return a list of numeric book IDs.
+            """
+        log.info(f"Searching LibGen: {query!r}")
+    try:
+                r = session.get(
+                                LIBGEN_SEARCH_URL,
+                                params={
+                                                    "req": query,
+                                                    "res": 25,
+                                                    "view": "simple",
+                                                    "phrase": 1,
+                                                    "column": "def",
+                                },
+                                timeout=30,
+                )
+                r.raise_for_status()
+except requests.RequestException as e:
+        log.error(f"Search request failed: {e}")
+        return []
 
-def generate_human_path(start, end, steps=25):
-    """Generate human-like mouse path using Bezier curves with control points"""
-    x1, y1 = start
-    x2, y2 = end
-    
-    # Add 2-3 random control points for natural curve
-    num_control = random.randint(2, 3)
-    control_points = [(x1, y1)]
-    
-    for i in range(num_control):
-        # Control points with random offset from straight line
-        t = (i + 1) / (num_control + 1)
-        base_x = x1 + (x2 - x1) * t
-        base_y = y1 + (y2 - y1) * t
-        
-        # Random deviation (more at middle, less at ends)
-        deviation = 50 * math.sin(t * math.pi)
-        offset_x = random.uniform(-deviation, deviation)
-        offset_y = random.uniform(-deviation, deviation)
-        
-        control_points.append((base_x + offset_x, base_y + offset_y))
-    
-    control_points.append((x2, y2))
-    
-    # Generate path points
-    path = []
-    for i in range(steps + 1):
-        t = i / steps
-        # Ease in/out for natural acceleration
-        t = t * t * (3 - 2 * t)  # Smoothstep
-        point = bezier_curve(t, control_points)
-        
-        # Add micro-jitter
-        jitter_x = random.uniform(-2, 2)
-        jitter_y = random.uniform(-2, 2)
-        path.append((int(point[0] + jitter_x), int(point[1] + jitter_y)))
-    
-    return path
+    soup = BeautifulSoup(r.text, "lxml")
+    # Results live in <table id="res"> on libgen.rs
+    table = soup.find("table", id="res") or soup.find("table", class_="c")
+    if not table:
+                log.warning("Results table not found — no matches or site changed layout")
+                return []
 
-def human_click_delay():
-    """Human-like delay before/after click"""
-    time.sleep(random.uniform(0.05, 0.15))
+    ids: list[str] = []
+    for row in table.find_all("tr")[1:]:  # skip header row
+                cells = row.find_all("td")
+                if not cells:
+                                continue
+                            cell_text = cells[0].get_text(strip=True)
+        if cell_text.isdigit():
+                        ids.append(cell_text)
+                    if len(ids) >= max_results:
+                                    break
 
-# =============================================================================
-# CLOUDFLARE TURNSTILE SOLVER
-# =============================================================================
+    log.info(f"Found {len(ids)} result IDs")
+    return ids
 
-def is_cloudflare_page(page) -> bool:
-    """Detect Cloudflare challenge page"""
-    html = page.html.lower()
-    indicators = [
-        "checking your browser",
-        "just a moment",
-        "cf-browser-verification",
-        "challenge-running",
-        "turnstile",
-        "cf-turnstile",
-        "_cf_chl"
-    ]
-    return any(ind in html for ind in indicators)
 
-def find_turnstile_iframe(page):
-    """Find the Cloudflare Turnstile iframe"""
-    logger.info("Searching for Turnstile iframe...")
-    
-    # Common Turnstile iframe selectors
-    iframe_selectors = [
-        "iframe[src*='challenges.cloudflare.com']",
-        "iframe[src*='turnstile']",
-        "iframe[title*='Cloudflare']",
-        "iframe[title*='turnstile']",
-        "iframe.cf-turnstile",
-        "[id*='cf-turnstile'] iframe",
-        "div.cf-turnstile iframe",
-    ]
-    
-    for selector in iframe_selectors:
+# ---------------------------------------------------------------------------
+# Step 2 — Metadata via JSON API
+# ---------------------------------------------------------------------------
+def get_metadata(ids: list[str]) -> list[dict]:
+        """
+            Fetch rich metadata for a list of LibGen IDs via the JSON API.
+                Returns a list of dicts with keys: id, title, author, extension, md5, filesize, year, language.
+                    """
+    if not ids:
+                return []
+
+    log.info(f"Fetching metadata for {len(ids)} IDs via JSON API")
+    try:
+                r = session.get(
+                    LIBGEN_JSON_URL,
+                    params={
+                        "ids": ",".join(ids),
+                                        "fields": "id,title,author,extension,md5,filesize,year,language",
+                    },
+                    timeout=30,
+    )
+        r.raise_for_status()
+        data = r.json()
+        log.info(f"Metadata received for {len(data)} books")
+        return data
+except requests.RequestException as e:
+        log.error(f"JSON API request failed: {e}")
+except ValueError as e:
+        log.error(f"JSON parse error: {e}")
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — Pick best result
+# ---------------------------------------------------------------------------
+FORMAT_PRIORITY = {"epub": 100, "pdf": 80, "mobi": 60, "azw3": 50, "djvu": 30}
+
+
+def pick_best(books: list[dict]) -> dict | None:
+        """
+            Score books and return the best candidate.
+                Prefer EPUB > PDF > others, English language, and larger files.
+                    """
+    if not books:
+                return None
+
+    def score(b: dict) -> int:
+                s = FORMAT_PRIORITY.get(b.get("extension", "").lower(), 0)
+        lang = b.get("language", "").lower()
+        if lang in ("english", "en", "eng"):
+                        s += 50
+elif not lang:
+            s += 10  # unknown is OK
         try:
-            iframe = page.ele(f"css:{selector}", timeout=2)
-            if iframe:
-                logger.info(f"Found Turnstile iframe: {selector}")
-                return iframe
-        except:
-            continue
-    
+                        s += min(int(b.get("filesize", 0)), 200_000) // 10_000
+except (ValueError, TypeError):
+            pass
+        return s
+
+    best = max(books, key=score)
+    log.info(
+                f"Selected: [{best.get('extension','?')}] "
+                f"{best.get('title','?')} — {best.get('author','?')} "
+                f"({best.get('year','?')}) MD5={best.get('md5','?')}"
+    )
+    return best
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — Resolve download URL from library.lol
+# ---------------------------------------------------------------------------
+def get_download_url(md5: str) -> str | None:
+        """
+            Fetch the library.lol page for an MD5 and extract the direct GET link.
+                """
+    page_url = LIBRARY_LOL_URL.format(md5=md5.lower())
+    log.info(f"Fetching download page: {page_url}")
+
+    try:
+                r = session.get(page_url, timeout=30)
+        r.raise_for_status()
+except requests.RequestException as e:
+        log.error(f"library.lol request failed: {e}")
+        return _fallback_libgen_li(md5)
+
+    soup = BeautifulSoup(r.text, "lxml")
+
+    # Primary: <div id="download"><ul><li><a href="...">GET</a>
+    dl_div = soup.find("div", id="download")
+    if dl_div:
+                a = dl_div.find("a", href=True)
+        if a:
+            href = a["href"]
+            log.info(f"Download URL (div#download): {href}")
+            return href
+
+    # Fallback A: any link with 'GET' text
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(strip=True).upper()
+                            if text in ("GET", "GET\n"):
+            href = a["href"]
+            log.info(f"Download URL (GET text): {href}")
+            return href
+
+                                    # Fallback B: direct link to known file hosts
+                                    import re
+    for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if re.search(r"libgen\.(li|lc|gs)|library\.lol/get", href):
+                                log.info(f"Download URL (mirror link): {href}")
+                                return href
+
+            log.warning("No download link found on library.lol — trying libgen.li fallback")
+    return _fallback_libgen_li(md5)
+
+
+def _fallback_libgen_li(md5: str) -> str | None:
+        """
+            Fallback: resolve via libgen.li ads page → extract direct link.
+                """
+    url = LIBGEN_LI_DL.format(md5=md5.lower())
+    log.info(f"Trying libgen.li fallback: {url}")
+    try:
+                r = session.get(url, timeout=30)
+                r.raise_for_status()
+                soup = BeautifulSoup(r.text, "lxml")
+                a = soup.find("a", href=re.compile(r"get\.php|/get/"))
+                if a:
+                                href = a["href"]
+                                if not href.startswith("http"):
+                                                    href = "https://libgen.li/" + href.lstrip("/")
+                                                log.info(f"Fallback download URL: {href}")
+                                return href
+    except requests.RequestException as e:
+        log.error(f"libgen.li fallback failed: {e}")
     return None
 
-def find_turnstile_checkbox(page, iframe):
-    """Find the checkbox element inside Turnstile"""
-    logger.info("Looking for Turnstile checkbox...")
-    
-    # Try to get iframe location for coordinate-based clicking
+
+# ---------------------------------------------------------------------------
+# Step 5 — Download file
+# ---------------------------------------------------------------------------
+def download_file(url: str, save_path: Path) -> bool:
+        log.info(f"Downloading → {save_path.name}")
     try:
-        # Get iframe bounding box
-        rect = iframe.rect
-        if rect:
-            iframe_x = rect.get('x', 0)
-            iframe_y = rect.get('y', 0)
-            iframe_w = rect.get('width', 300)
-            iframe_h = rect.get('height', 65)
-            
-            # Checkbox is typically in the left portion of the iframe
-            # Approximately 20-30px from left, centered vertically
-            checkbox_x = iframe_x + 28 + random.randint(-3, 3)
-            checkbox_y = iframe_y + (iframe_h / 2) + random.randint(-3, 3)
-            
-            logger.info(f"Calculated checkbox position: ({checkbox_x}, {checkbox_y})")
-            return (checkbox_x, checkbox_y)
-    except Exception as e:
-        logger.warning(f"Could not get iframe rect: {e}")
-    
-    return None
-
-def move_mouse_human(page, target_x, target_y):
-    """Move mouse to target using human-like Bezier path"""
-    try:
-        # Get current mouse position (or start from random corner)
-        start_x = random.randint(100, 400)
-        start_y = random.randint(100, 300)
-        
-        path = generate_human_path((start_x, start_y), (target_x, target_y))
-        
-        logger.info(f"Moving mouse from ({start_x},{start_y}) to ({target_x},{target_y})")
-        
-        for x, y in path:
-            page.actions.move_to(x, y)
-            time.sleep(random.uniform(0.01, 0.03))
-            
-        return True
-    except Exception as e:
-        logger.warning(f"Mouse move error: {e}")
-        return False
-
-def click_turnstile_checkbox(page, coords):
-    """Click the Turnstile checkbox with human-like behavior"""
-    x, y = coords
-    
-    try:
-        # Move mouse to target
-        move_mouse_human(page, x, y)
-        
-        # Small pause before click
-        human_click_delay()
-        
-        # Click
-        logger.info(f"Clicking at ({x}, {y})...")
-        page.actions.click()
-        
-        # Small pause after click
-        human_click_delay()
-        
-        return True
-    except Exception as e:
-        logger.error(f"Click error: {e}")
-        return False
-
-def solve_cloudflare_turnstile(page, max_attempts=3) -> bool:
-    """Attempt to solve Cloudflare Turnstile challenge"""
-    logger.info("=" * 40)
-    logger.info("CLOUDFLARE TURNSTILE SOLVER")
-    logger.info("=" * 40)
-    
-    for attempt in range(max_attempts):
-        logger.info(f"Solve attempt {attempt + 1}/{max_attempts}")
-        
-        # Wait a bit for page to stabilize
-        time.sleep(random.uniform(2, 4))
-        
-        # Find Turnstile iframe
-        iframe = find_turnstile_iframe(page)
-        
-        if not iframe:
-            logger.warning("No Turnstile iframe found, waiting...")
-            time.sleep(3)
-            continue
-        
-        # Find checkbox coordinates
-        coords = find_turnstile_checkbox(page, iframe)
-        
-        if not coords:
-            logger.warning("Could not locate checkbox")
-            continue
-        
-        # Click the checkbox
-        if click_turnstile_checkbox(page, coords):
-            logger.info("Click performed, waiting for verification...")
-            
-            # Wait for challenge to process
-            time.sleep(random.uniform(3, 6))
-            
-            # Check if challenge is solved
-            if not is_cloudflare_page(page):
-                logger.info("SUCCESS: Cloudflare challenge solved!")
-                return True
-            else:
-                logger.warning("Challenge still present after click")
-        
-        # Exponential backoff between attempts
-        time.sleep(2 ** attempt)
-    
-    logger.error("Failed to solve Turnstile after all attempts")
-    page.get_screenshot(path="debug_turnstile_fail.png")
-    return False
-
-def wait_and_solve_cloudflare(page, max_wait=120) -> bool:
-    """Wait for and solve Cloudflare challenge"""
-    if not is_cloudflare_page(page):
-        return True
-    
-    logger.info("Cloudflare challenge detected!")
-    page.get_screenshot(path="debug_cloudflare_detected.png")
-    
-    start = time.time()
-    
-    # Try to solve actively
-    if solve_cloudflare_turnstile(page):
-        return True
-    
-    # Fallback: Just wait (some challenges auto-resolve)
-    logger.info("Active solve failed, waiting for auto-resolution...")
-    while is_cloudflare_page(page):
-        if time.time() - start > max_wait:
-            logger.error("Cloudflare timeout")
-            return False
-        time.sleep(3)
-    
-    return True
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-def random_delay(min_sec=1.0, max_sec=3.0):
-    time.sleep(random.uniform(min_sec, max_sec))
-
-def safe_click(page, element):
-    """Click element with fallbacks for elements without location/size"""
-    try:
-        # Try normal click first
-        element.click()
-        return True
-    except Exception as e:
-        if "no location or size" in str(e):
-            logger.info("Element has no location, trying JS click...")
-            try:
-                # JavaScript click fallback
-                page.run_js("arguments[0].click()", element)
-                return True
-            except Exception as e2:
-                logger.warning(f"JS click failed: {e2}")
-                # Try clicking via href if it's a link
-                try:
-                    href = element.attr("href")
-                    if href:
-                        logger.info(f"Navigating directly to: {href}")
-                        if href.startswith("/"):
-                            href = f"https://welib.org{href}"
-                        page.get(href)
-                        return True
-                except:
-                    pass
-        logger.error(f"Click failed: {e}")
-        return False
-
-def clean_filename(name: str) -> str:
-    return re.sub(r'[^\w\s-]', '', name)[:50].strip().replace(' ', '_')
-
-def download_file_curl(url: str, filename: str, referer: str, cookies=None) -> bool:
-    """Download using curl_cffi"""
-    logger.info(f"Downloading: {url}")
-    
-    try:
-        headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-            "Referer": referer,
-            "Accept": "application/pdf,application/epub+zip,*/*",
-        }
-        
-        if cookies:
-            cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-            headers["Cookie"] = cookie_str
-            
-        response = requests.get(
-            url,
-            headers=headers,
-            impersonate="chrome120",
-            timeout=300, 
-            verify=False,
-            allow_redirects=True
-        )
-        
-        if response.status_code not in [200, 206]:
-            logger.error(f"Download failed: {response.status_code}")
-            return False
-            
-        save_path = DOWNLOADS_DIR / filename
-        with open(save_path, 'wb') as f:
-            f.write(response.content)
-            
-        size = save_path.stat().st_size
-        logger.info(f"Downloaded {size:,} bytes")
-        
-        if size < 1000:
-            save_path.unlink()
-            return False
-            
-        return True
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-        return False
-
-# =============================================================================
-# MAIN WORKFLOW
-# =============================================================================
-
-def process_workflow(page, query: str) -> bool:
-    """Main download workflow with Cloudflare solving"""
-    logger.info(f"Processing: {query}")
-    
-    encoded_query = quote(query)
-    search_url = f"https://welib.org/search?q={encoded_query}"
-    
-    try:
-        # Navigate
-        random_delay(1, 2)
-        page.get(search_url)
-        
-        # Handle Cloudflare
-        if not wait_and_solve_cloudflare(page):
-            return False
-        
-        # Wait for results
-        random_delay(2, 4)
-        
-        # Click book - Refined selector to avoid sidebar (div.mb-4 is used in filters too!)
-        logger.info("Looking for book...")
-        # Use 'main' to scope strictly to search results, avoiding sidebar/header
-        book = page.ele("css:main div.mb-4 a", timeout=60)
-        
-        if book:
-            # excessive safety check: ensure it's not a random link
-            href = book.attr("href")
-            if not href or href == "#":
-                logger.warning(f"Found book element but href is suspicious: {href}. Trying fallbacks...")
-                book = None
-        
-        if not book:
-             # Fallback
-             book = page.ele("css:div.cursor-pointer, a[href*='/text/'], a[href*='/book/']", timeout=10)
-        
-        if not book:
-            logger.error("No results found")
-            page.get_screenshot(path="debug_no_results.png")
-            return False
-
-        logger.info("Clicking book...")
-        if not safe_click(page, book):
-            return False
-        random_delay(3, 5)
-        
-        if not wait_and_solve_cloudflare(page):
-            return False
-        
-        # Find Read button
-        logger.info("Looking for 'Read' button...")
-        # Selector strategy based on user feedback:
-        # <a href="/slow_download... ... Read ... </a>
-        read = page.ele("css:a[href*='/slow_download']", timeout=10) or \
-               page.ele("css:a[href*='/read/']", timeout=10) or \
-               page.ele("text:Read", timeout=5)
-        
-        if not read:
-            logger.warning("No Read button found. Trying backup search...")
-            # Backup: search for any link containing 'Read' text
-            read = page.ele("xpath://a[contains(text(), 'Read')]", timeout=5)
-            
-        # Click Read and handle subsequent Cloudflare challenge
-        logger.info("Clicking Read...")
-        
-        # Click and immediately check for new page load / challenge
-        if not safe_click(page, read):
-            return False
-            
-        logger.info("Clicked Read. Waiting for potential Cloudflare challenge...")
-        time.sleep(5) # Wait for challenge to trigger
-        
-        if is_cloudflare_page(page):
-            logger.info("New Cloudflare challenge detected! Solving...")
-            if not wait_and_solve_cloudflare(page):
+                with session.get(url, stream=True, timeout=300) as r:
+                                r.raise_for_status()
+            content_type = r.headers.get("Content-Type", "")
+            if "text/html" in content_type:
+                                log.warning(f"Response is HTML, not a file (Content-Type: {content_type})")
                 return False
-        
-        # INCREASED WAIT: Allow time for iframe to load after challenge
-        logger.info("Waiting for iframe to load...")
-        time.sleep(10)  # Fixed wait for slow load
-        random_delay(3, 5)
-        
-        # Find iframe - Deep Search for ANY iframe with correct src
-        logger.info("Waiting for viewer iframe...")
-        page.get_screenshot(path="debug_before_iframe.png")
-        
-        iframe = None
-        
-        # Try finding ANY iframe by iterating through all of them
-        # RECURSIVE SEARCH: Check iframes inside iframes too
-        def find_iframe_recursive(ele_list, depth=0):
-            if depth > 2: return None
-            for fr in ele_list:
-                try:
-                    src = fr.attr("src")
-                    if src:
-                        logger.info(f"Checking iframe (depth {depth}) src: {src[:50]}...")
-                        if 'fast_view' in src or 'web-premium' in src or 'url=' in src:
-                            return fr
-                    
-                    # Check inside this iframe
-                    inner_frames = fr.eles("css:iframe")
-                    if inner_frames:
-                        res = find_iframe_recursive(inner_frames, depth + 1)
-                        if res: return res
-                except:
-                    continue
-            return None
 
-        # --- SEARCH STRATEGY START ---
-        real_url = None
-        
-        # 1. BROAD SEARCH (User request): Look for ANY element with fast_view?url
-        logger.info("STRATEGY 1: Broad Search for 'fast_view?url'...")
-        
-        def check_element_for_download(ele):
-            try:
-                candidates = [ele.attr("href"), ele.attr("src"), ele.attr("data-src")]
-                for val in candidates:
-                    if val and "fast_view?url" in val:
-                        # Decode
-                        if val.startswith("/"): val = "https://welib.org" + val
-                        try:
-                            parsed = urlparse(val)
-                            qs = parse_qs(parsed.query)
-                            if 'url' in qs:
-                                decoded = unquote(qs['url'][0])
-                                if any(x in decoded.lower() for x in ['.pdf', '.epub', '.mobi']):
-                                    return decoded
-                        except:
-                            pass
-            except:
-                pass
-            return None
+            with open(save_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65_536):
+                                        if chunk:
+                                                                    f.write(chunk)
 
-        # RETRY LOOP: Wait for content to load (JS might populate it late)
-        for attempt in range(1, 4):
-            logger.info(f"Broad Search Attempt {attempt}/3...")
-            potential_urls = []
-            
-            # Scan specific tags
-            for tag in ["a", "iframe", "embed", "object"]:
-                 eles = page.eles(f"css:{tag}[href*='fast_view?url'], {tag}[src*='fast_view?url']")
-                 for e in eles:
-                     res = check_element_for_download(e)
-                     if res: potential_urls.append(res)
-
-            # Brute force if empty
-            if not potential_urls:
-                any_eles = page.eles("css:*[src*='fast_view?url'], *[href*='fast_view?url']")
-                for e in any_eles:
-                     res = check_element_for_download(e)
-                     if res: potential_urls.append(res)
-            
-            if potential_urls:
-                real_url = potential_urls[0]
-                logger.info(f"MATCH (Broad Search): {real_url}")
-                break
-                
-            logger.info("No match yet, waiting 5s...")
-            time.sleep(5)
-
-        # 2. STRICT #bookIframe SEARCH (Fallback)
-        if not real_url:
-            logger.info("STRATEGY 2: Strict #bookIframe Search...")
-            iframe = page.ele("#bookIframe", timeout=5)
-            if iframe:
-                # Check src
-                src = iframe.attr("src")
-                if src and "url=" in src:
-                     try:
-                         if src.startswith("/"): src = "https://welib.org" + src
-                         qs = parse_qs(urlparse(src).query)
-                         if 'url' in qs:
-                             decoded = unquote(qs['url'][0])
-                             if ".pdf" in decoded:
-                                 real_url = decoded
-                                 logger.info(f"MATCH (#bookIframe src): {real_url}")
-                     except: pass
-                
-                # Check inner content if src failed
-                if not real_url:
-                    try:
-                        pdf_link = iframe.ele("css:a[href$='.pdf']", timeout=2)
-                        if pdf_link:
-                            real_url = pdf_link.attr("href")
-                            logger.info(f"MATCH (#bookIframe inner link): {real_url}")
-                    except: pass
-
-        # 3. RECURSIVE IFRAME SEARCH (Deep Fallback)
-        if not real_url:
-            logger.info("STRATEGY 3: Recursive Iframe Search...")
-            iframe = find_iframe_recursive(page.eles("css:iframe"))
-            if iframe:
-                 # Check src
-                 src = iframe.attr("src")
-                 if src and "url=" in src:
-                     try:
-                         qs = parse_qs(urlparse(src).query)
-                         if 'url' in qs:
-                             real_url = unquote(qs['url'][0])
-                             logger.info(f"MATCH (Recursive src): {real_url}")
-                     except: pass
-        
-        # 4. LAST RESORT: PAGE TEXT SCAN
-        if not real_url:
-            logger.info("STRATEGY 4: Page Text Regex Scan...")
-            import re
-            match = re.search(r'https?://[^"\s<>]+\.pdf', page.html)
-            if match:
-                real_url = match.group(0)
-                logger.info(f"MATCH (Regex Scan): {real_url}")
-
-        # --- FINAL DOWNLOAD ---
-        if not real_url:
-            logger.error("ALL STRATEGIES FAILED. Could not find download URL.")
-            # DUMP EVERYTHING FOR DEBUGGING THIS
-            page.get_screenshot(path="debug_failed_final.png")
-            with open("debug_failed_final.html", "w", encoding="utf-8") as f:
-                f.write(page.html)
-            logger.info("Dumped debug_failed_final.html and .png")
+                            size = save_path.stat().st_size
+        if size < 5_000:
+                        log.warning(f"File too small ({size} bytes) — likely an error page")
+            save_path.unlink(missing_ok=True)
             return False
-            
-        logger.info(f"FINAL URL: {real_url}")
-        
-        if not real_url.startswith("http"):
-            logger.error(f"Invalid URL format: {real_url}")
-            return False
-        
-        safe_title = clean_filename(query)
-        ext = ".pdf"
-        if ".epub" in real_url: ext = ".epub"
-        elif ".mobi" in real_url: ext = ".mobi"
-        
-        return download_file_curl(real_url, f"{safe_title}{ext}", page.url, page.cookies())
 
-    except Exception as e:
-        logger.error(f"Workflow error: {e}")
-        page.get_screenshot(path="debug_error.png")
+        log.info(f"Saved {size:,} bytes → {save_path}")
+        return True
+except requests.RequestException as e:
+        log.error(f"Download error: {e}")
+        save_path.unlink(missing_ok=True)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def clean_filename(name: str) -> str:
+        import re
+    name = re.sub(r'[^\w\s\-]', '', name)
+    name = re.sub(r'\s+', '_', name.strip())
+    return name
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+def process_query(query: str) -> bool:
+        log.info("")
+    log.info("=" * 55)
+    log.info(f" QUERY: {query}")
+    log.info("=" * 55)
+
+    # 1. Search
+    ids = search_libgen(query)
+    if not ids:
+        log.error("No search results — skipping")
+        return False
+
+    # 2. Metadata
+    books = get_metadata(ids)
+    if not books:
+        log.error("Could not fetch metadata — skipping")
+        return False
+
+    # 3. Pick best
+    book = pick_best(books)
+    if not book:
+        log.error("No suitable book found")
+        return False
+
+    md5 = book.get("md5", "").strip()
+                if not md5:
+                                         log.error("Book has no MD5 hash")
+        return False
+
+    # 4. Resolve download URL
+    time.sleep(random.uniform(1.0, 2.5))
+    dl_url = get_download_url(md5)
+    if not dl_url:
+                log.error("Could not resolve download URL")
+        return False
+
+    # 5. Download
+    ext = book.get("extension", "pdf").lower()
+    title = clean_filename(book.get("title", query))
+    save_path = DOWNLOADS_DIR / f"{title}.{ext}"
+
+    # Avoid overwriting if already downloaded
+    if save_path.exists() and save_path.stat().st_size > 5_000:
+        log.info(f"Already exists: {save_path} — skipping download")
+                return True
+
+    time.sleep(random.uniform(1.0, 3.0))
+    return download_file(dl_url, save_path)
+
 
 def main():
-    logger.info("=" * 60)
-    logger.info("WeLib Downloader - Cloudflare SOLVER Edition")
-    logger.info("=" * 60)
-    
+    log.info("LibGen Downloader — API Edition (no browser, no Cloudflare)")
+
     DOWNLOADS_DIR.mkdir(exist_ok=True)
-    
+
     if not SEARCH_TERMS_FILE.exists():
-        logger.error("search_terms.txt not found!")
+                log.error(f"{SEARCH_TERMS_FILE} not found!")
         sys.exit(1)
-    
-    search_terms = [l.strip() for l in SEARCH_TERMS_FILE.read_text(encoding='utf-8-sig').split('\n') if l.strip()]
-    logger.info(f"Loaded {len(search_terms)} terms")
-    
-    # Browser options - NOT headless (Cloudflare detects it)
-    options = ChromiumOptions()
-    options.set_argument('--no-sandbox')
-    options.set_argument('--disable-gpu')
-    options.set_argument('--disable-dev-shm-usage')
-    options.set_argument('--disable-blink-features=AutomationControlled')
-    options.set_argument(f'--user-agent={random.choice(USER_AGENTS)}')
-    options.set_argument('--start-maximized')
-    
-    logger.info("Launching browser...")
-    page = ChromiumPage(options)
-    
-    # Warmup
-    logger.info("Warming up...")
-    try:
-        page.get("https://welib.org")
-        random_delay(3, 5)
-        wait_and_solve_cloudflare(page)
-    except Exception as e:
-        logger.warning(f"Warmup issue: {e}")
-    
-    success = 0
-    fail = 0
-    
-    for term in search_terms:
-        if process_workflow(page, term):
-            logger.info(f"SUCCESS: {term}")
-            success += 1
-        else:
-            logger.error(f"FAILED: {term}")
+
+    raw_lines = SEARCH_TERMS_FILE.read_text(encoding="utf-8-sig").splitlines()
+    terms = [l.strip() for l in raw_lines if l.strip() and not l.strip().startswith("#")]
+
+    if not terms:
+        log.error("No search terms found in search_terms.txt")
+        sys.exit(1)
+
+    log.info(f"Processing {len(terms)} search term(s)")
+
+    success = fail = 0
+    for i, term in enumerate(terms):
+                if process_query(term):
+                    success += 1
+                                log.info(f"SUCCESS: {term}")
+else:
             fail += 1
-        random_delay(5, 10)
-    
-    logger.info("=" * 60)
-    logger.info(f"DONE: {success} success, {fail} failed")
-    logger.info("=" * 60)
-    
-    page.quit()
+            log.error(f"FAILED: {term}")
+
+        # Polite delay between searches (skip after last)
+        if i < len(terms) - 1:
+                        delay = random.uniform(3.0, 7.0)
+            log.info(f"Waiting {delay:.1f}s ...")
+            time.sleep(delay)
+
+    # Summary
+    log.info("")
+    log.info("=" * 55)
+    log.info(f" DONE — {success} succeeded, {fail} failed")
+    log.info("=" * 55)
+
+    downloaded = sorted(DOWNLOADS_DIR.iterdir())
+        if downloaded:
+        log.info("Downloaded files:")
+        for f in downloaded:
+                        log.info(f"  {f.name} ({f.stat().st_size:,} bytes)")
+            else:
+                                        log.info("No files in downloads/")
+
+    sys.exit(0 if fail == 0 else 1)
+
 
 if __name__ == "__main__":
-    main()
+                                    main()
